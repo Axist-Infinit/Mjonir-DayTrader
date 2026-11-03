@@ -191,6 +191,13 @@ card reads "Claude wants to use Place stock order" with that JSON and two
 buttons: Allow once, Deny. Allow once sends it to the paper account. The
 `why` and the plan stay in the file; they are never sent.
 
+## OTO orders (no take-profit)
+
+A plan with no target (trader-exit `--target none --exit close`) becomes an `oto` order: the entry and
+its stop-loss, no take-profit. `ticket.py` names the class (`order_class`: bracket, oto or simple) and
+prints the flatten reminder on the ticket, after the yes and after the result: "No take-profit on this
+order: flatten by 15:55 New York (ticket.py flatten --symbol TSLA)." Say it to the user every time.
+
 ## What it never does
 
 - Never places an order without all three gates, and never two orders on one yes.

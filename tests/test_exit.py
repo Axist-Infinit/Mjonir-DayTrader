@@ -149,7 +149,9 @@ class Cli(unittest.TestCase):
             json.dump(doc, fh)
 
     def plan(self, *args):
-        return run(exitp, ["plan", "--now", "2026-10-19 10:16"] + list(args))
+        # Mjonir chunk 2: costs are on by default and the 1R reel is refused net of them; these tests pin
+        # upstream's mechanics (tests/test_measure_scripts.py covers the costs)
+        return run(exitp, ["plan", "--now", "2026-10-19 10:16", "--no-costs"] + list(args))
 
     def read_plan(self):
         with open(os.path.join("trader", "plan.json")) as fh:

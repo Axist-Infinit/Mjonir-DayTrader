@@ -200,6 +200,21 @@ def trade_cost_r(entry, risk, model):
     return cost_r(rt, risk)
 
 
+def plan_terms(plan, cfg=None):
+    """(per_side_bps, commission_usd, source) for sizing or checking an order: the plan's cost card from
+    trader-exit when it carries one (its ADV tier and spread), else the config's costs block with the ADV
+    unverified (the most expensive tier) and the default half spread (0 under spread_source none)."""
+    s = settings(cfg)
+    card = (plan or {}).get("costs") if isinstance((plan or {}).get("costs"), dict) else None
+    if card and not card.get("off") and card.get("per_side_bps") is not None:
+        return float(card["per_side_bps"]), float(card["commission_usd"]), "the plan's cost card"
+    if is_off(s):
+        return 0.0, 0.0, "zero in the config"
+    slip, _ = tier_bps(None, s["slippage_tiers_bps"])
+    half = 0.0 if s["spread_source"] == "none" else s["default_half_spread_bps"]
+    return slip + half, s["commission_usd"], "the config (ADV unverified: the most expensive tier)"
+
+
 # ---------------------------------------------------------------- the card
 
 def cost_card(entry, stop, target, shares, adv_usd=None, quote=None, now_ms=None, cfg=None, long=True,

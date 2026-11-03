@@ -29,9 +29,16 @@ def at(text):
     return check.parse_now(text)
 
 
+# Mjonir chunk 2: costs are on by default. These tests pin upstream's mechanics, so cfg() zeroes them in
+# the config (zero tiers, no commission, no spread) and the CLI calls pass --no-costs;
+# tests/test_measure_scripts.py covers the net loss, the net reward:risk, the spread and the no-target checks.
+NO_COSTS = {"slippage_tiers_bps": [[0, 0]], "commission_usd": 0, "spread_source": "none"}
+
+
 def cfg(**over):
     with open(CFG_PATH) as fh:
         c = json.load(fh)
+    c["costs"] = dict(NO_COSTS)
     c.update(over)
     return c
 
@@ -121,7 +128,7 @@ class TheReel(unittest.TestCase):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 code = check.main(["--orders", TSLA_PATH, "--config", CFG_PATH, "--portfolio", none,
-                                   "--prices", none, "--state", none, "--now", NOW, "--out", out])
+                                   "--prices", none, "--state", none, "--now", NOW, "--out", out, "--no-costs"])
             text = buf.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("PASS  #1 buy TSLA 8 shares, entry", text)
@@ -470,7 +477,7 @@ class Cli(unittest.TestCase):
                           fh)
             none = os.path.join(d, "none")
             base = ["--orders", TSLA_PATH, "--config", CFG_PATH, "--portfolio", none, "--prices", pp,
-                    "--state", none, "--no-write"]
+                    "--state", none, "--no-write", "--no-costs"]
             buf = io.StringIO()
             with redirect_stdout(buf):
                 self.assertEqual(check.main(base + ["--now", "2026-10-19 10:55"]), 1)

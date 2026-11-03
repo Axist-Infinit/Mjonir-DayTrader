@@ -36,9 +36,16 @@ V1 = {"budget": 5000, "cash_buffer_pct": 10, "max_position_pct": 25, "max_order_
       "fractional": True, "paper": True, "blocked": []}
 
 
+# Mjonir chunk 2: costs are on by default. These tests pin upstream's mechanics, so cfg() zeroes them in
+# the config (zero tiers, no commission, no spread) and the plan-mode CLI calls pass --no-costs;
+# tests/test_measure_scripts.py covers the costs.
+NO_COSTS = {"slippage_tiers_bps": [[0, 0]], "commission_usd": 0, "spread_source": "none"}
+
+
 def cfg(**over):
     with open(CFG) as fh:
         c = json.load(fh)
+    c["costs"] = dict(NO_COSTS)
     c.update(over)
     return c
 
@@ -125,7 +132,7 @@ class TheReel(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "trader", "orders.json")
             code, text, _ = run(["--plan", PLAN, "--config", CFG, "--portfolio", os.path.join(d, "none"),
-                                 "--now", NOW, "--write", out])
+                                 "--now", NOW, "--write", out, "--no-costs"])
             self.assertEqual(code, 0)
             self.assertIn("Size: 8 shares of TSLA = $2,913.44 at 364.18", text)
             self.assertIn("8 x 5.86 = $46.88", text)
@@ -141,7 +148,7 @@ class TheReel(unittest.TestCase):
 
     def test_cli_json_and_limit(self):
         code, text, _ = run(["--plan", PLAN, "--config", CFG, "--portfolio", "/nonexistent", "--now", NOW,
-                             "--limit", "--json"])
+                             "--limit", "--json", "--no-costs"])
         self.assertEqual(code, 0)
         out = json.loads(text)
         self.assertEqual(out["sizing"]["qty"], 8)
@@ -191,7 +198,8 @@ class PlanRules(unittest.TestCase):
             pp = os.path.join(d, "prices.json")
             with open(pp, "w") as fh:
                 json.dump(prices_doc(366.475), fh)
-            base = ["--plan", PLAN, "--config", CFG, "--portfolio", os.path.join(d, "none"), "--prices", pp, "--json"]
+            base = ["--plan", PLAN, "--config", CFG, "--portfolio", os.path.join(d, "none"), "--prices", pp, "--json",
+                    "--no-costs"]
             code, text, _ = run(base + ["--now", "2026-10-19 10:55"])
             out = json.loads(text)
             self.assertEqual((code, out["sizing"]["qty"], out["orders"]), (1, 6, []))
@@ -205,7 +213,8 @@ class PlanRules(unittest.TestCase):
             pf = os.path.join(d, "portfolio.json")
             with open(pf, "w") as fh:
                 json.dump({"cash": 1200, "positions": []}, fh)
-            out = json.loads(run(["--plan", PLAN, "--config", CFG, "--portfolio", pf, "--now", NOW, "--json"])[1])
+            out = json.loads(run(["--plan", PLAN, "--config", CFG, "--portfolio", pf, "--now", NOW, "--json",
+                                  "--no-costs"])[1])
             self.assertEqual((out["sizing"]["qty"], out["sizing"]["bound_by"]), (1, "cash"))
 
     def test_bad_plans(self):

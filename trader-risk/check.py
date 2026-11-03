@@ -39,11 +39,23 @@ What blocks an entry (on top):
   daily limit   max_orders_per_day orders placed today
   stop          no stop while "require_stop": true (a bracket stop_loss_stop_price
                 or the order's plan stop); a stop on the wrong side of the entry
-  loss          qty x (entry - stop) over max_loss_per_trade_usd. The entry is
-                the limit price for a limit order, else the HIGHER of the plan's
-                entry and a fresh price (under 15 minutes old), so a stale plan
-                cannot understate the risk
-  reward:risk   (target - entry) / (entry - stop) under min_reward_risk
+  loss          qty x (entry - stop) over max_loss_per_trade_usd, NET of costs:
+                qty x (risk + round-trip slippage and spread) + both commissions
+                (mjonir/costs.py: the plan's cost card, else the config's costs
+                block with the ADV unverified). The entry is the limit price for
+                a limit order, else the HIGHER of the plan's entry and a fresh
+                price (under 15 minutes old), so a stale plan cannot understate
+                the risk
+  reward:risk   NET (target - entry - round trip) / (entry - stop + round trip)
+                under min_reward_risk ("min_reward_risk_basis": "net", the
+                default; "gross" is upstream's (target - entry) / (entry - stop)).
+                No target: allow_no_target false (default) blocks; true with
+                the plan's exit at the close and a flat_by passes; true without
+                an exit rule is unverified
+  spread        the full NBBO spread over costs.spread_max_frac_of_risk of the
+                risk a share; a quote not measured live and fresh (60 s) is
+                unverified: a warning, or a block with "spread_unverified":
+                "block" (live under --source massive, else the plan's quote)
   daily loss    the max losses at the stops of today's entries plus this one
                 over max_daily_loss_usd (win or lose, each counts in full)
   trades        max_trades_per_day entries already placed today
@@ -54,6 +66,8 @@ What blocks an entry (on top):
   pdt           only with "pdt_guard": true: 3 day trades already in the last
                 5 business days (a 4th would trip the old pattern-day-trader rule)
 
+Every new check also lands in the result's "checks" list with its state
+(pass / block / unverified). --no-costs checks gross, as upstream did.
 Exit code 0 when every order passes, 1 when any order is blocked.
 The verdicts go to trader/state/risk.json with a fingerprint of each order,
 so trader-broker only shows an order as ready if THIS exact order passed today.
@@ -62,6 +76,7 @@ so trader-broker only shows an order as ready if THIS exact order passed today.
 import argparse
 import datetime
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -126,6 +141,63 @@ EARLY = datetime.time(13, 0)
 
 class RiskError(Exception):
     pass
+
+
+def _measure(name):
+    """mjonir.<name> (costs, stats, outcomes, control): one definition for every script, on every run."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        return importlib.import_module("mjonir." + name)
+    except ImportError as e:
+        raise RiskError("the measurement layer (mjonir/%s.py) is missing at %s: %s" % (name, root, e))
+
+
+def _live_quote():
+    """--source massive: a function SYM -> the Massive NBBO {bid, ask, t_ms} or None (never 0)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise RiskError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(RiskError).quote
+
+
+def no_target_check(plan, oc, c):
+    """The no-target case, three outcomes: allow_no_target false -> block; true with the plan's exit at the
+    close (or an OTO order) and a flat_by -> pass; true without that exit rule -> unverified."""
+    if not c.get("allow_no_target"):
+        return {"name": "target", "state": "block",
+                "reason": "reward:risk: no target to measure it against (min_reward_risk %s; allow_no_target is "
+                          "false)" % _num(c["min_reward_risk"])}
+    exits = plan.get("exit") == "close" or oc == "oto"
+    if exits and plan.get("flat_by"):
+        return {"name": "target", "state": "pass",
+                "reason": "no target (allow_no_target): out at the stop or flat by %s" % plan["flat_by"]}
+    return {"name": "target", "state": "unverified",
+            "reason": "no target and no exit rule in the order's plan (exit close with a flat_by): how it exits "
+                      "cannot be checked"}
+
+
+def spread_check(sym, ref, risk, plan, st, now_utc, quote_fn=None):
+    """The spread gate on the live quote (quote_fn, --source massive) or the plan's own quote, fresh at now."""
+    costs = _measure("costs")
+    quote, basis = None, None
+    if quote_fn is not None:
+        quote, basis = quote_fn(sym), "Massive NBBO at the check"
+    card = plan.get("costs") if isinstance(plan.get("costs"), dict) else {}
+    if not quote and card.get("quote"):
+        quote, basis = card["quote"], "the plan's quote"
+    now_ms = int((now_utc - datetime.datetime(1970, 1, 1)).total_seconds() * 1000)
+    if st["spread_source"] == "snapshot":
+        half, qstate = costs.half_spread_bps(quote, now_ms, st["quote_fresh_seconds"])
+    else:
+        half, qstate = None, "default"
+    gate = costs.spread_gate(half, qstate, ref, risk, st["spread_max_frac_of_risk"])
+    return dict(gate, name="spread", basis=basis or "no quote")
 
 
 def _calendar_overlay(g):
@@ -387,13 +459,24 @@ def day_trades(state, today):
 
 # ---------------------------------------------------------------- the check
 
-def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None):
+def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None,
+          no_costs=False, quote_fn=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
 
     now          naive UTC (default: the real clock); its New York date is "today"
-    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh"""
+    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh
+    no_costs     gross only (upstream's loss and reward:risk; no spread check)
+    quote_fn     SYM -> {bid, ask, t_ms} or None: the live NBBO for the spread check"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
+    costs = _measure("costs")
+    try:
+        cost_settings = costs.settings(c)
+    except costs.CostError as e:
+        raise RiskError("costs: %s" % e)
+    basis = str(c.get("min_reward_risk_basis") or "net")
+    if basis not in ("net", "gross"):
+        raise RiskError("min_reward_risk_basis is net or gross, not %r" % basis)
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
     now_utc = now or parse_now(None)
     now_et = to_eastern(now_utc)
@@ -433,7 +516,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         return prices[sym] if -60 <= age <= FRESH_MINUTES * 60 else None
 
     for i, o in enumerate(orders, 1):
-        reasons, warns, info = [], [], []
+        reasons, warns, info, checks = [], [], [], []
         later = []                       # entry-only reasons, turned into warnings for an exit
         sym = str(o.get("symbol", "")).strip().upper()
         side = str(o.get("side", "")).strip().lower()
@@ -444,6 +527,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         oc = str(o.get("order_class") or "").strip().lower()
         legs = o.get("take_profit_limit_price") is not None or o.get("stop_loss_stop_price") is not None
         bracket = oc == "bracket" or (not oc and legs)
+        oto = oc == "oto"
         value = None
 
         # format
@@ -485,6 +569,18 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             if o.get("take_profit_limit_price") is None or o.get("stop_loss_stop_price") is None:
                 reasons.append("format: a bracket order needs both take_profit_limit_price and "
                                "stop_loss_stop_price")
+        elif oto:
+            if notional is not None:
+                reasons.append("format: an OTO order needs a whole-share qty, not a notional amount")
+            elif _f(qty) is not None and abs(_f(qty) - round(_f(qty))) > 1e-9:
+                reasons.append("format: an OTO order takes whole shares only, got qty %r" % qty)
+            if tif not in ("day", "gtc"):
+                reasons.append("format: an OTO order needs time_in_force day or gtc, got %r" % tif)
+            if o.get("stop_loss_stop_price") is None:
+                reasons.append("format: an OTO order here is the entry plus its stop-loss: it needs "
+                               "stop_loss_stop_price")
+            if o.get("take_profit_limit_price") is not None:
+                reasons.append("format: an OTO order carries one exit leg; with a take-profit too it is a bracket")
         elif oc or o.get("advanced_instructions"):
             warns.append("advanced order (%s): check every leg before you say yes"
                          % (oc or "advanced_instructions"))
@@ -585,7 +681,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                "If you bought it, record the fill first (ticket.py fill)" % (sym, _num(held)))
 
         # day-trade checks: stop, loss, reward:risk, daily loss, trades, window, pdt
-        max_loss = risk_ps = rr = stop = target = None
+        max_loss = risk_ps = rr = rr_net = stop = target = max_loss_gross = rt_ps = None
         if kind == "entry" and side in ("buy", "sell"):
             long = side == "buy"
             leg_stop, plan_stop = _f(o.get("stop_loss_stop_price")), _f(plan.get("stop"))
@@ -611,11 +707,24 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     risk_c = int(round(abs(ref - stop) * 100))
                     risk_ps = risk_c / 100.0
                     shares = q if q is not None else ((value or 0) / ref)
-                    max_loss = round(shares * risk_ps, 2)
+                    side_bps, commission, cost_from = (0.0, 0.0, "off (--no-costs)") if no_costs else \
+                        costs.plan_terms(plan, c)
+                    slip_rt = 2.0 * ref * side_bps / 1e4
+                    costs_on = slip_rt > 0 or commission > 0
+                    max_loss_gross = round(shares * risk_ps, 2)
+                    max_loss = round(shares * (risk_ps + slip_rt) + (2.0 * commission if shares else 0.0), 2) \
+                        if costs_on else max_loss_gross
+                    rt_ps = slip_rt + (2.0 * commission / shares if shares else 0.0)
                     cap = _f(c.get("max_loss_per_trade_usd"))
                     if cap and max_loss > cap + CENT:
-                        later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max loss "
-                                     "per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
+                        if costs_on:
+                            later.append("loss: %s shares x (%s risk + %.4f round trip) + %s commissions = %s at "
+                                         "the stop, net of costs, over your %s max loss per trade"
+                                         % (_num(shares), _p(risk_ps), slip_rt, money(2 * commission),
+                                            money(max_loss), money(cap)))
+                        else:
+                            later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max "
+                                         "loss per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
                     min_rr = _f(c.get("min_reward_risk"))
                     if target:
                         if (long and target <= ref + CENT) or (not long and target >= ref - CENT):
@@ -623,12 +732,34 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                          % (_p(target), "above" if long else "below", _p(ref)))
                         else:
                             rr = round(int(round(abs(target - ref) * 100)) / float(risk_c), 2)
-                            if min_rr and rr < min_rr - 1e-9:
+                            rr_net = round((abs(target - ref) - rt_ps) / (risk_ps + rt_ps), 2)
+                            if min_rr and costs_on and basis == "net":
+                                if rr_net < min_rr - 1e-9:
+                                    later.append("reward:risk: net %.2f (gross %.2f; target %s, entry %s, stop %s, a "
+                                                 "%.4f a share round trip) is under your minimum %s"
+                                                 % (rr_net, rr, _p(target), _p(ref), _p(stop), rt_ps, _num(min_rr)))
+                            elif min_rr and rr < min_rr - 1e-9:
                                 later.append("reward:risk: %.2f (target %s, entry %s, stop %s) is under your "
                                              "minimum %s" % (rr, _p(target), _p(ref), _p(stop), _num(min_rr)))
                     elif min_rr:
-                        later.append("reward:risk: no target to measure it against (min_reward_risk %s)"
-                                     % _num(min_rr))
+                        nt = no_target_check(plan, oc, c)
+                        checks.append(nt)
+                        if nt["state"] == "block":
+                            later.append(nt["reason"])
+                        elif nt["state"] == "unverified":
+                            (later if c.get("block_on_unverified") else warns).append("unverified: " + nt["reason"])
+                        else:
+                            info.append("target: " + nt["reason"])
+                    if not no_costs and cost_settings["spread_source"] != "none":
+                        sp = spread_check(sym, ref, risk_ps, plan, cost_settings, now_utc, quote_fn)
+                        checks.append(sp)
+                        if sp["state"] == "block":
+                            later.append("spread: " + sp["reason"])
+                        elif sp["state"] == "unverified":
+                            if cost_settings["spread_unverified"] == "block":
+                                later.append("spread: unverified, " + sp["reason"])
+                            else:
+                                warns.append("spread unverified: " + sp["reason"])
             daily = _f(c.get("max_daily_loss_usd"))
             if daily and max_loss is not None:
                 used = loss_today + batch_loss
@@ -649,11 +780,21 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 info.append("entry %s (%s), stop %s, target %s: risk %s a share"
                             % (_p(ref), REF_WORDS.get(ref_from, ref_from), _p(stop),
                                _p(target) if target else "none", _p(risk_ps)))
-                info.append("max loss %s%s, reward:risk %s%s"
-                            % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
-                               if _f(c.get("max_loss_per_trade_usd")) else "",
-                               ("%.2f" % rr) if rr is not None else "n/a",
-                               (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
+                if max_loss != max_loss_gross:
+                    info.append("max loss %s net of costs (%s gross)%s, reward:risk %s net (%s gross)%s"
+                                % (money(max_loss), money(max_loss_gross),
+                                   (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
+                                   if _f(c.get("max_loss_per_trade_usd")) else "",
+                                   ("%.2f" % rr_net) if rr_net is not None else "n/a",
+                                   ("%.2f" % rr) if rr is not None else "n/a",
+                                   (" (min %s, %s)" % (_num(c["min_reward_risk"]), basis))
+                                   if _f(c.get("min_reward_risk")) else ""))
+                else:
+                    info.append("max loss %s%s, reward:risk %s%s"
+                                % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
+                                   if _f(c.get("max_loss_per_trade_usd")) else "",
+                                   ("%.2f" % rr) if rr is not None else "n/a",
+                                   (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
             if daily or cap_t:
                 info.append("today before this: %d of %s trades, %s of %s daily loss"
                             % (len(entries_today) + batch_entries, cap_t or "unlimited",
@@ -706,6 +847,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             "stop": stop, "target": target, "risk_per_share": risk_ps, "max_loss": max_loss,
             "reward_risk": rr, "fingerprint": fingerprint(o), "verdict": verdict,
             "reasons": reasons, "warnings": warns, "info": info,
+            "max_loss_gross": max_loss_gross, "reward_risk_net": rr_net,
+            "round_trip_per_share": None if rt_ps is None else round(rt_ps, 4), "checks": checks,
         })
 
     return {
@@ -794,6 +937,9 @@ def main(argv=None):
     ap.add_argument("--today", help="YYYY-MM-DD (default: today in New York)")
     ap.add_argument("--out", default="trader/state/risk.json", help="where the verdicts are recorded")
     ap.add_argument("--no-write", action="store_true", help="do not record the verdicts")
+    ap.add_argument("--no-costs", action="store_true", help="gross only: upstream's loss and reward:risk")
+    ap.add_argument("--source", choices=["yahoo", "massive"], help="massive: the live NBBO for the spread check "
+                                                                   "(or export TRADER_SOURCE=massive)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -809,7 +955,9 @@ def main(argv=None):
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
-        res = check(orders, cfg, portfolio, prices, state, a.today, now, times)
+        quote_fn = _live_quote() if (a.source or os.environ.get("TRADER_SOURCE")) == "massive" else None
+        res = check(orders, cfg, portfolio, prices, state, a.today, now, times, no_costs=a.no_costs,
+                    quote_fn=quote_fn)
         if pdoc.get("as_of"):
             res["prices_as_of"] = pdoc["as_of"]
         if not a.no_write:

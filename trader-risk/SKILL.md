@@ -162,6 +162,21 @@ massive --write` fills `trader/prices.json` from Massive for this check. The NYS
 `python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
 A date past the built-in lists then stops warning once that file covers its year.
 
+## Costs, the spread and the no-target check
+
+Loss and reward:risk are checked NET of costs (`max_loss` net, `max_loss_gross`, `reward_risk_net`;
+`--no-costs` checks gross, as upstream did). Every new check lands in the result's `checks` list
+with a state, pass, block or unverified:
+
+- `spread`: the full NBBO spread against `costs.spread_max_frac_of_risk` (0.10) of the risk a share.
+  Live under `--source massive`; otherwise the plan's own quote if it is under 60 seconds old.
+  Not measured: unverified, a warning (`costs.spread_unverified: "block"` makes it a block).
+- `target` (no target and a `min_reward_risk`): `allow_no_target` false (the default) blocks; true
+  with the plan's exit at the close and a `flat_by` passes; true without that exit rule is
+  unverified (a warning, or a block with `block_on_unverified`).
+
+Narrate the state of each check exactly as printed; an unverified check is never a pass.
+
 ## What it never does
 
 It never places an order, never edits an order to make it pass, never

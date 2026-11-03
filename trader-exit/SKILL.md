@@ -43,7 +43,7 @@ level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
 | file | what |
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
-| `trader/config.json` | `flat_by` (15:55) and `min_reward_risk` (1.0: a note here, trader-risk enforces it) |
+| `trader/config.json` | `flat_by` (15:55), `min_reward_risk` (1.0: refused here on the NET basis, `min_reward_risk_basis`), `max_loss_per_trade_usd` (the share basis for the commission) and the `costs` block |
 | Yahoo chart API | only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
 | `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
 
@@ -122,6 +122,21 @@ to read the entry session's bars from the Massive market-data API instead of Yah
 for any past session. The plan's own rules do not change. Without the flag nothing
 changes. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
 `python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
+## Costs, the net reward:risk and the Zarattini form
+
+The plan carries a cost card (`costs`, from `mjonir/costs.py`): the slippage tier from the stock's
+ADV$ (Massive under `--source massive`, else unverified: the most expensive tier), the half spread
+(the live NBBO when fresh, else the default, and the spread gate unverified), and the commission on
+both orders over the share basis. It prints `reward_risk_gross` and `reward_risk_net`, net =
+(reward - round trip) / (risk + round trip). Under `min_reward_risk` on the net basis the plan is
+refused with the numbers: the reel's 1R plan (net 0.77) is refused; `--target 2R` passes (net 1.66
+on 8 shares). `--no-costs` or `"min_reward_risk_basis": "gross"` keeps upstream's warning.
+
+`--target none --exit close --stop datr:0.10` is the Zarattini form: no target, out at the stop or
+the flat-by close, the stop 0.10 x the 14-day daily ATR (Massive daily bars before the plan's day;
+without them the plan is refused, unverified). The plan writes `exit: close` and `target: null`;
+trader-budget turns it into an OTO order and trader-risk checks `allow_no_target`.
 
 ## What it never does
 

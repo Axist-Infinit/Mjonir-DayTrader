@@ -109,7 +109,13 @@ class Flow(unittest.TestCase):
         self.orders = os.path.join(self.d, "orders.json")
         shutil.copy(ORDERS_PATH, self.orders)
         self.cfg = os.path.join(self.d, "config.json")
-        shutil.copy(CFG_PATH, self.cfg)
+        # Mjonir chunk 2: costs are on by default; this flow pins upstream's mechanics, so its config zeroes them
+        # (zero tiers, no commission, no spread). tests/test_measure_scripts.py covers the costs and OTO tickets.
+        with open(CFG_PATH) as fh:
+            c = json.load(fh)
+        c["costs"] = {"slippage_tiers_bps": [[0, 0]], "commission_usd": 0, "spread_source": "none"}
+        with open(self.cfg, "w") as fh:
+            json.dump(c, fh)
         self.risk = os.path.join(self.d, "state", "risk.json")
         self.state = os.path.join(self.d, "state", "broker.json")
         self.pf = os.path.join(self.d, "portfolio.json")

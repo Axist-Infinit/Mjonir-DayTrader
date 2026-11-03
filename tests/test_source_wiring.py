@@ -164,11 +164,18 @@ class Exit(Wired):
         self.serve("fetch_chart_doc", lambda *a, **kw: doc_of(TSLA))
         args = ["plan", "--symbol", "TSLA", "--entry", "364.18", "--date", "2026-10-19", "--entry-bar", "8",
                 "--stop", "atr:1.5", "--now", "2026-10-19 10:15", "--json"]
-        c1, off, _ = run(exitp, args + ["--offline", TSLA])
-        c2, mas, err = run(exitp, args + ["--source", "massive"])
+        # chunk 2: the bars must agree; the costs differ by source (ADV from Massive), so compared below
+        c1, off, _ = run(exitp, args + ["--offline", TSLA, "--no-costs"])
+        c2, mas, err = run(exitp, args + ["--source", "massive", "--no-costs"])
         self.assertEqual((c1, c2), (0, 0), err)
         self.assertEqual(json.loads(off), json.loads(mas))
         self.assertEqual(self.calls[0][1][2:6], ("TSLA", dt.date(2026, 10, 19), "5m", False))
+        self.serve("fetch_adv_usd", 2.0e10)
+        c3, net, err = run(exitp, args + ["--source", "massive"])
+        self.assertEqual(c3, 0, err)
+        card = json.loads(net)["costs"]
+        self.assertEqual((card["slippage_bps"], card["quote_note"]), (4.0, "no live quote for a past day (2026-10-19)"))
+        self.assertEqual([c[0] for c in self.calls].count("fetch_quote"), 0)
 
 
 class TimeMachine(Wired):

@@ -148,6 +148,17 @@ a separate config (`--config`) for a long-term split.
 - No projections: never say what a trade will make. A target is a plan, not a forecast.
 - Free Yahoo prices are unofficial and can lag. The broker's price is the one that fills.
 
+## Costs and the OTO order
+
+Costs are on by default (`mjonir/costs.py`; `--no-costs` or a zero `costs` block turns them off).
+The max loss includes the round-trip slippage and spread and both commissions:
+`floor((max loss - 2 x commission) / (risk + round-trip slippage))` shares, the cost terms from the
+plan's cost card (trader-exit) or the config with the ADV unverified. The reward:risk refusal reads
+the NET ratio. Narrate `sizing.max_loss` (net) beside `sizing.max_loss_gross`, and
+`sizing.reward_risk_net`. A plan with no target (`exit: close`) writes an `oto` order: the entry and
+its stop-loss, no take-profit; the user flattens by `flat_by`. Its reward:risk refusal is skipped with
+a note.
+
 ## What it never does
 
 It never places, approves or schedules an order, never raises a limit on its

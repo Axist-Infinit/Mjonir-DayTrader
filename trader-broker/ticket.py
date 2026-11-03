@@ -18,7 +18,9 @@ work around the one moment that matters, your yes:
             placed (with the broker's order id), denied, or failed.
   fill      records a fill in trader/portfolio.json (cash and shares).
   flatten   builds a sell ticket that closes a symbol's open position by
-            flat_by. It still goes through trader-risk and your yes.
+            flat_by. It still goes through trader-risk and your yes. An OTO
+            order (the entry and its stop-loss, no take-profit: trader-exit's
+            --target none --exit close) always needs one: the ticket says so.
   log       prints today's decisions.
 
     python3 ticket.py show                    # every order, READY or not
@@ -192,6 +194,24 @@ def is_bracket(order):
     return oc == "bracket" or (not oc and legs)
 
 
+def order_class_of(order):
+    """bracket (entry, stop-loss, take-profit), oto (entry and its stop-loss, no take-profit: flatten by
+    flat_by) or simple (one order)."""
+    if str(order.get("order_class") or "").lower() == "oto":
+        return "oto"
+    return "bracket" if is_bracket(order) else "simple"
+
+
+def flat_by_of(order, cfg=None):
+    return (order.get("plan") or {}).get("flat_by") or (cfg or {}).get("flat_by") or "15:55"
+
+
+def flatten_reminder(order, cfg=None):
+    """The OTO line: no take-profit, so the position is closed by hand at flat_by."""
+    return ("No take-profit on this order: flatten by %s New York (ticket.py flatten --symbol %s)."
+            % (flat_by_of(order, cfg), str(order.get("symbol", "")).upper()))
+
+
 def max_loss(order):
     """(dollars, stop) lost if the stop fills exactly at the stop, or (None, stop)."""
     stop = _f(order.get("stop_loss_stop_price")) or _f((order.get("plan") or {}).get("stop"))
@@ -217,7 +237,7 @@ def plain_parts(order):
     sym = order.get("symbol", "?")
     typ = str(order.get("type", "market"))
     tif = TIF_WORDS.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
-    if is_bracket(order):
+    if is_bracket(order) or order_class_of(order) == "oto":
         how = "limit %s" % _p(order["limit_price"]) if typ == "limit" and order.get("limit_price") else typ
         parts = ["%s %s %s, %s, %s" % (side, _str_num(order.get("qty")), sym, how, tif)]
         if order.get("stop_loss_stop_price") is not None:
@@ -227,6 +247,8 @@ def plain_parts(order):
             parts.append(leg)
         if order.get("take_profit_limit_price") is not None:
             parts.append("take-profit %s" % _p(order["take_profit_limit_price"]))
+        elif order_class_of(order) == "oto":
+            parts.append("no take-profit: flat by %s" % flat_by_of(order))
         loss, stop = max_loss(order)
         if loss is not None:
             parts.append("max loss about %s if the stop fills at %s (it can fill worse in a fast market)"
@@ -369,9 +391,13 @@ def render(order, idx, total, cfg, risk, state, today):
         lines.append("  Claude will call place_stock_order with exactly:")
         for l in json.dumps(tool_input(order), indent=2).splitlines():
             lines.append("    " + l)
-        if is_bracket(order):
+        if order_class_of(order) == "oto":
+            lines.append("  Alpaca places the entry, then its stop-loss. There is no take-profit.")
+        elif is_bracket(order):
             lines.append("  Alpaca places the entry, then the stop-loss and the take-profit as two orders")
             lines.append("  that cancel each other: when one fills, the other is canceled.")
+    if order_class_of(order) == "oto":
+        lines.append("  " + flatten_reminder(order, cfg))
     if ready:
         lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
         if broker != "ibkr":
@@ -386,7 +412,8 @@ def ticket_json(order, idx, cfg, risk, state, today):
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
             "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
             "tool_input": tool_input(order), "why": order.get("why", ""),
-            "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+            "bracket": is_bracket(order), "order_class": order_class_of(order), "max_loss": loss, "stop": stop,
+            "flatten_reminder": flatten_reminder(order, cfg) if order_class_of(order) == "oto" else None}
 
 
 # ---------------------------------------------------------------- fills -> portfolio
@@ -521,6 +548,8 @@ def cmd_approve(a):
     else:
         print("Now call place_stock_order with exactly:")
         print(json.dumps(tool_input(order), indent=2))
+        if order_class_of(order) == "oto":
+            print(flatten_reminder(order, cfg))
         print("Claude's card shows Allow once / Deny. Then: ticket.py result --index %d --status "
               "placed|denied|failed" % a.index)
     return 0
@@ -564,7 +593,10 @@ def cmd_result(a):
     elif a.status == "placed":
         print("When it fills, record it: ticket.py fill --symbol %s --side %s --qty Q --price P"
               % (rec["symbol"], rec["side"]))
-        if rec.get("kind") == "entry" and is_bracket(order):
+        if rec.get("kind") == "entry" and order_class_of(order) == "oto":
+            print("When the stop-loss fills later, record that sell the same way.")
+            print(flatten_reminder(order, cfg))
+        elif rec.get("kind") == "entry" and is_bracket(order):
             print("When the stop-loss or the take-profit fills later, record that sell the same way.")
     return 0
 

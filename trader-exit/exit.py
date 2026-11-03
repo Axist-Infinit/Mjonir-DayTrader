@@ -8,6 +8,8 @@ It never places an order.
     python3 exit.py plan --symbol TSLA --entry 364.18 --or-high 362.18 --or-low 354.47
     python3 exit.py plan --stop atr:1.5 --offline TSLA.json # ATR needs the session's bars
     python3 exit.py plan --symbol NVDA --entry 190.25 --setup level --stop pct:1
+    python3 exit.py plan --target none --exit close --stop datr:0.10   # the Zarattini form (no target)
+    python3 exit.py plan --no-costs                         # gross only (upstream's mechanics)
     python3 exit.py show                                    # the current trader/plan.json
 
 Stops (a long's stop rounds DOWN to the cent, away from the entry):
@@ -18,11 +20,26 @@ Stops (a long's stop rounds DOWN to the cent, away from the entry):
   atr:K      K times the 14-bar ATR under the entry, on the session's bars up
              to the entry bar (--offline FILE or Yahoo). With fewer than 14
              bars by then it averages all of them and says so.
+  datr:K     K times the 14-day ATR of DAILY bars before the plan's day
+             (mjonir.bars.daily, Massive). No key or no answer: refused,
+             unverified, never a silent fallback.
   A level setup has no opening-range default: give a stop.
 
 Targets (round half up to the cent):
   2R (default), 1R, 1.5R ...   entry + R x risk, where risk = entry - stop
   price:X                      your price
+  none                         no target (with --exit close): out at the stop
+                               or at the flat-by close
+
+Costs (mjonir/costs.py, the "costs" block of trader/config.json): slippage by
+the stock's ADV$ tier (Massive under --source massive; otherwise unverified,
+the most expensive tier), the NBBO half spread (live and fresh, else the
+default and the spread gate unverified), and the commission on both orders
+over the share basis (--shares, or floor(max_loss_per_trade_usd / risk)). The
+plan prints gross and net reward:risk, net = (reward - round trip) / (risk +
+round trip), and writes the cost card into the plan. Under min_reward_risk on
+the NET basis ("min_reward_risk_basis": "net", the default) the plan is
+REFUSED; "gross", or --no-costs, keeps upstream's warning.
 
 Refused, with the reason: a stop at or above the entry, a target at or below
 it, a risk under 0.05% of the price (too tight to survive the spread), an
@@ -31,8 +48,8 @@ plans longs only).
 
 flat_by (default 15:55, or "flat_by" in trader/config.json): out by then, win
 or lose. On a 1:00 p.m. early close it moves up with the close (12:55).
-"min_reward_risk" in the config (default 1.0) only warns here; trader-risk
-enforces it.
+"min_reward_risk" in the config (default 1.0): refused on the net basis (see
+Costs); trader-risk enforces it again on the order.
 
 A stop is a plan, not a guarantee: a gap or a fast market can fill past it.
 Exit codes: plan 0 = a plan, 1 = refused or an error. show 0 = a plan exists.
@@ -41,6 +58,7 @@ Exit codes: plan 0 = a plan, 1 = refused or an error. show 0 = a plan exists.
 import argparse
 import datetime
 import gzip
+import importlib
 import json
 import os
 import re
@@ -54,8 +72,10 @@ UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakesch
 BACKOFF = 5.0
 HOSTS = ("query2", "query1")
 INTERVALS = {"1m": 60, "5m": 300}
-DEFAULTS = {"flat_by": "15:55", "min_reward_risk": 1.0}
+DEFAULTS = {"flat_by": "15:55", "min_reward_risk": 1.0, "min_reward_risk_basis": "net",
+            "max_loss_per_trade_usd": 50, "costs": None}
 ATR_BARS = 14
+DATR_DAYS = 14
 MIN_RISK_PCT = Decimal("0.05")     # risk under 0.05% of the price is inside the spread's noise
 CENT = Decimal("0.01")
 EPOCH = datetime.datetime(1970, 1, 1)
@@ -126,6 +146,17 @@ def _mjonir():
     except ImportError as e:
         raise PlanError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
     return yahoo_shape.adapter(PlanError)
+
+
+def _measure(name):
+    """mjonir.<name> (costs, stats, outcomes, control): one definition for every script, on every run."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        return importlib.import_module("mjonir." + name)
+    except ImportError as e:
+        raise PlanError("the measurement layer (mjonir/%s.py) is missing at %s: %s" % (name, root, e))
 
 
 # ---------------------------------------------------------------- time
@@ -268,9 +299,9 @@ def parse_stop(text):
         return "or_mid", None
     if t in ("or-low", "or_low", "low"):
         return "or_low", None
-    m = re.match(r"^(price|pct|atr):\s*\$?([0-9][0-9,]*\.?[0-9]*)$", t)
+    m = re.match(r"^(price|pct|atr|datr):\s*\$?([0-9][0-9,]*\.?[0-9]*)$", t)
     if not m:
-        raise PlanError("--stop is or-mid, or-low, price:X, pct:X or atr:K (got %r)" % text)
+        raise PlanError("--stop is or-mid, or-low, price:X, pct:X, atr:K or datr:K (got %r)" % text)
     kind, val = m.group(1), D(m.group(2), "--stop")
     if val <= 0:
         raise PlanError("--stop %s needs a number above 0" % kind)
@@ -281,6 +312,8 @@ def parse_stop(text):
 
 def parse_target(text):
     t = str(text).strip()
+    if t.lower() == "none":
+        return "none", None
     m = re.match(r"^([0-9]*\.?[0-9]+)\s*[Rr]$", t)
     if m:
         r = D(m.group(1), "--target")
@@ -290,7 +323,7 @@ def parse_target(text):
     m = re.match(r"^price:\s*\$?([0-9][0-9,]*\.?[0-9]*)$", t.lower())
     if m:
         return "price", D(m.group(1), "--target")
-    raise PlanError("--target is 2R, 1R, 1.5R ... or price:X (got %r)" % text)
+    raise PlanError("--target is 2R, 1R, 1.5R ..., price:X or none (got %r)" % text)
 
 
 def r_label(r):
@@ -331,6 +364,14 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
         label = "%s x ATR(%d) under the entry" % (num(stop_param), atr_bars)
         detail = "ATR $%s over the %d bars to the entry%s" % (
             num(a.quantize(Decimal("0.0001"))), atr_bars, " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
+    elif stop_rule == "datr":
+        if atr is None:
+            raise PlanError("a datr stop needs the daily bars before the plan's day")
+        a = D(round(atr, 6))
+        raw = e - stop_param * a
+        label = "%s x the %d-day daily ATR under the entry" % (num(stop_param), atr_bars)
+        detail = "daily ATR $%s over the %d sessions before the plan's day" % (
+            num(a.quantize(Decimal("0.0001"))), atr_bars)
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
     stop = floor_cents(raw)
@@ -347,6 +388,10 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
         raise PlanError("the stop is %s under the entry, less than 0.05%% of the price (%s on %s): too tight to "
                         "survive the spread, normal wiggle would stop you out. Widen it."
                         % (money(risk), money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
+    if target_rule == "none":
+        return {"entry": e, "stop": stop, "stop_label": label, "stop_detail": detail, "target": None,
+                "target_r": None, "target_label": "none: out at the stop or at the flat-by close",
+                "risk": risk, "reward_risk": None}
     if target_rule == "r":
         target = cents(e + target_param * risk)
         t_label = r_label(target_param)
@@ -513,6 +558,44 @@ def atr_of(bars, n=ATR_BARS):
     return sum(use) / len(use), len(use)
 
 
+def daily_atr(sym, day, n=DATR_DAYS):
+    """(atr, n): the mean true range of the n daily sessions strictly before `day`, from Massive's
+    adjusted daily bars (mjonir.bars.daily). Could not ask, or too few sessions: refused, unverified."""
+    try:
+        rows = _mjonir().daily_rows(sym, day - datetime.timedelta(days=int(n * 2.2) + 10),
+                                    day - datetime.timedelta(days=1))
+    except PlanError as e:
+        raise PlanError("the datr stop needs Massive daily bars and could not get them (unverified): %s" % e)
+    rows = [r for r in rows if to_eastern(utc_of(int(r[0]) // 1000)).date() < day]
+    if len(rows) < n + 1:
+        raise PlanError("the datr stop needs %d daily bars of %s before %s; Massive gave %d (unverified)"
+                        % (n + 1, sym, day, len(rows)))
+    rows = rows[-(n + 1):]
+    trs = [max(h - lo, abs(h - rows[i][4]), abs(lo - rows[i][4]))
+           for i, (_, _o, h, lo, _c, _v) in enumerate(rows[1:])]
+    return sum(trs) / len(trs), len(trs)
+
+
+def cost_inputs(sym, day, now_utc):
+    """(adv_usd, adv_note, quote, quote_note) for the cost card. ADV$ and the NBBO come from Massive under
+    --source massive; otherwise ADV is unverified (the most expensive tier) and the spread is the default."""
+    if SOURCE != "massive":
+        return None, "unverified: --source yahoo has no ADV (the most expensive tier)", None, \
+            "no live quote under --source yahoo"
+    adv = quote = None
+    try:
+        adv = _mjonir().adv_usd(sym, day.isoformat())
+        adv_note = "Massive: mean close x volume over the 20 sessions before %s" % day
+    except PlanError as e:
+        adv_note = "unverified: %s" % e
+    if day == to_eastern(utc_now()).date():
+        quote = _mjonir().quote(sym)
+        quote_note = "Massive NBBO" if quote else "unverified: Massive gave no quote"
+    else:
+        quote_note = "no live quote for a past day (%s)" % day
+    return adv, adv_note, quote, quote_note
+
+
 # ---------------------------------------------------------------- plan
 
 def read_json(path, what):
@@ -532,6 +615,8 @@ def read_config(path):
         for k in DEFAULTS:
             if doc.get(k) is not None:
                 cfg[k] = doc[k]
+    if cfg.get("min_reward_risk_basis") not in ("net", "gross"):
+        raise PlanError("min_reward_risk_basis is net or gross, not %r" % cfg.get("min_reward_risk_basis"))
     return cfg
 
 
@@ -605,7 +690,13 @@ def build_plan(a, now_utc):
                             % info["setup"])
         stop_text = "or-mid"
     stop_rule, stop_param = parse_stop(stop_text)
-    target_rule, target_param = parse_target(a.target or "2R")
+    exit_rule = getattr(a, "exit", None)
+    target_rule, target_param = parse_target(a.target or ("none" if exit_rule == "close" else "2R"))
+    if target_rule == "none" and exit_rule == "target":
+        raise PlanError("--target none means no target: use --exit close (out at the stop or the flat-by close)")
+    if target_rule != "none" and exit_rule == "close":
+        raise PlanError("--exit close has no target: give --target none, or drop --exit close")
+    exit_rule = "close" if target_rule == "none" else "target"
     day = None
     if info["date"]:
         try:
@@ -623,6 +714,8 @@ def build_plan(a, now_utc):
             raise PlanError("an atr stop needs at least 3 closed %s bars of %s on %s by the entry; found %d"
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
+    elif stop_rule == "datr":
+        atr, atr_n = daily_atr(info["symbol"], day)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
                 atr, atr_n)
     flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
@@ -630,27 +723,60 @@ def build_plan(a, now_utc):
     if info["or_high"] is not None and info["or_low"] is not None:
         orr = {"high": float(cents(info["or_high"])), "low": float(cents(info["or_low"])),
                "minutes": int(info["or_minutes"] or 15)}
+    target = None if c["target"] is None else float(c["target"])
     plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
             "setup": info["setup"], "entry": float(c["entry"]),
             "entry_time": ampm(entry_time) if entry_time else None,
             "entry_bar": info["entry_bar"], "interval": info["interval"], "opening_range": orr,
             "stop": float(c["stop"]), "stop_rule": stop_rule, "stop_label": c["stop_label"],
-            "target": float(c["target"]), "target_r": float(c["target_r"]), "target_label": c["target_label"],
-            "risk_per_share": float(c["risk"]), "reward_risk": float(c["reward_risk"]), "flat_by": flat_by,
+            "target": target, "target_r": None if c["target_r"] is None else float(c["target_r"]),
+            "target_label": c["target_label"], "exit": exit_rule,
+            "risk_per_share": float(c["risk"]),
+            "reward_risk": None if c["reward_risk"] is None else float(c["reward_risk"]), "flat_by": flat_by,
             "stop_detail": c["stop_detail"], "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
     if atr is not None:
         plan["atr"] = round(atr, 4)
         plan["atr_bars"] = atr_n
+    card = None
+    if not getattr(a, "no_costs", False):
+        costs = _measure("costs")
+        risk = float(c["risk"])
+        if getattr(a, "shares", None):
+            shares, how, ml = int(a.shares), "--shares %d" % int(a.shares), None
+        else:
+            ml = float(cfg.get("max_loss_per_trade_usd") or costs.DEFAULT_MAX_LOSS_USD)
+            shares, how = costs.shares_basis(risk, ml)
+        adv, adv_note, quote, quote_note = cost_inputs(info["symbol"], day, now_utc)
+        try:
+            card = costs.cost_card(float(c["entry"]), float(c["stop"]), target, shares, adv_usd=adv, quote=quote,
+                                   now_ms=int((now_utc - EPOCH).total_seconds() * 1000), cfg=cfg,
+                                   adv_note=adv_note, quote_note=quote_note, max_loss_usd=ml)
+        except costs.CostError as e:
+            raise PlanError("costs: %s" % e)
+        card["shares_basis"] = how
+    plan["costs"] = card
+    plan["reward_risk_gross"] = plan["reward_risk"]
+    plan["reward_risk_net"] = (card["reward_risk_net"] if card else plan["reward_risk"])
     warnings = []
     if flat_note:
         warnings.append("Flat-by %s: %s." % (flat_by, flat_note))
     mrr = cfg.get("min_reward_risk")
     try:
-        if mrr is not None and c["reward_risk"] < D(mrr):
-            warnings.append("Reward:risk %s is under your min_reward_risk %s in the config: trader-risk checks that."
-                            % (ratio(c["reward_risk"]), num(D(mrr))))
+        mrr = D(mrr) if mrr is not None else None
     except PlanError:
-        pass
+        mrr = None
+    if target is None:
+        warnings.append("No target: the plan exits at the stop or at the %s flat-by close; reward:risk is not "
+                        "measured (trader-risk checks allow_no_target)." % flat_by)
+    elif mrr is not None and card and not card.get("off") and cfg.get("min_reward_risk_basis") == "net":
+        if D(plan["reward_risk_net"]) < mrr:
+            raise PlanError("net reward:risk %.2f (gross %s, after a %.4f a share round trip, %.3f R) is under your "
+                            "min_reward_risk %s: refused. A farther target (--target 2R) or a closer stop changes it."
+                            % (plan["reward_risk_net"], ratio(c["reward_risk"]), card["round_trip_per_share"],
+                               card["cost_r"], num(mrr)))
+    elif mrr is not None and c["reward_risk"] < mrr:
+        warnings.append("Reward:risk %s is under your min_reward_risk %s in the config: trader-risk checks that."
+                        % (ratio(c["reward_risk"]), num(mrr)))
     today = to_eastern(now_utc).date()
     if day != today:
         warnings.append("This plan is for %s, not today (%s)." % (day.isoformat(), today.isoformat()))
@@ -673,9 +799,20 @@ def describe(plan):
     out.append("  Entry         %s%s" % (money(plan["entry"]), when))
     out.append("  Stop          %s  %s%s" % (money(plan["stop"]), plan["stop_label"],
                                              (": " + plan["stop_detail"]) if plan.get("stop_detail") else ""))
-    out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
+    if plan.get("target") is None:
+        out.append("  Target        none: out at the stop or at the flat-by close")
+    else:
+        out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
-    out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
+    card = plan.get("costs")
+    if plan.get("reward_risk") is None:
+        out.append("  Reward:risk   not measured (no target)")
+    elif card and not card.get("off"):
+        out.append("  Reward:risk   %s gross, %s net" % (ratio(plan["reward_risk"]), ratio(plan["reward_risk_net"])))
+    else:
+        out.append("  Reward:risk   %s gross (costs off)" % ratio(plan["reward_risk"]))
+    if "costs" in plan:
+        out.append("  " + _measure("costs").card_line(card))
     out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
@@ -710,7 +847,9 @@ def cmd_show(a):
         print("No plan at %s yet. Make one: exit.py plan --write" % a.plan)
         return 1
     plan = read_json(a.plan, "plan")
-    for k in ("symbol", "date", "entry", "stop", "target", "risk_per_share", "reward_risk", "flat_by"):
+    need = ("symbol", "date", "entry", "stop", "risk_per_share", "flat_by") if plan.get("exit") == "close" else \
+        ("symbol", "date", "entry", "stop", "target", "risk_per_share", "reward_risk", "flat_by")
+    for k in need:
         if plan.get(k) is None:
             raise PlanError("%s is missing %r: make a new plan with exit.py plan --write" % (a.plan, k))
     if a.json:
@@ -740,8 +879,12 @@ def main(argv=None):
     p.add_argument("--entry-bar", type=int)
     p.add_argument("--interval", choices=["5m", "1m"])
     p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
-    p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K")
-    p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X")
+    p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K, datr:K")
+    p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X, none (with --exit close)")
+    p.add_argument("--exit", choices=["target", "close"], help="close: no target, out at the stop or flat-by close")
+    p.add_argument("--shares", type=int, help="the share count the commission is spread over (default: from "
+                                              "max_loss_per_trade_usd / risk)")
+    p.add_argument("--no-costs", action="store_true", help="gross only: no slippage, spread or commission")
     p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--offline", metavar="PATH", help="saved Yahoo chart JSON for an atr stop")
