@@ -1,0 +1,41 @@
+{
+ "status": "OK",
+ "results": [
+  {
+   "id": "dbe378bac57c97e81b427f3232696f785949045da9725e610e253ff75e698878",
+   "title": "Stock Market Today, Nov. 2: Rivian Rallies on UBS Upgrade and Solid R2 Demand Outlook",
+   "author": "Robert Izquierdo",
+   "published_utc": "2026-11-02T22:17:23Z",
+   "article_url": "https://www.fool.com/coverage/stock-market-today/2026/11/02/stock-market-today-nov-2-rivian-rallies-on-ubs-upgrade-and-solid-r2-demand-outlook/?source=iedfolrf0000001",
+   "tickers": [
+    "RIVN",
+    "TSLA",
+    "F",
+    "FpB",
+    "FpC",
+    "FpD"
+   ],
+   "description": "Rivian Automotive surged 8.47% on November 2, 2026, following a UBS upgrade to Buy rating. UBS cited solid early R2 demand and a path to positive automotive gross margin as reasons for the upgrade, calling the recent selloff overdone. The company's Q3 results showed 38% year-over-year revenue growth to $2.2 billion, with the R2 becoming its best-selling vehicle by volume. A $1 billion term loan from the Volkswagen joint venture also provided additional liquidity support.",
+   "publisher": {
+    "name": "The Motley Fool"
+   }
+  },
+  {
+   "id": "d364f202c89246354453bc5106db0431873a0ac46f9800ad3bf23d9c134e3b3b",
+   "title": "Tesla Has a Flying Car. What Does This Mean for Archer's Flying \"Taxi\" Business?",
+   "author": "Steven Porrello",
+   "published_utc": "2026-11-02T22:00:00Z",
+   "article_url": "https://www.fool.com/investing/2026/11/02/tesla-has-a-flying-car-what-mean-for-archer/?source=iedfolrf0000001",
+   "tickers": [
+    "TSLA",
+    "ACHR"
+   ],
+   "description": "Tesla recently demonstrated a flying Roadster capable of brief flight, raising questions about competition with Archer Aviation's eVTOL air taxi. However, the vehicles serve different purposes: Tesla's is a single-passenger sports car for spectacle, while Archer's is a practical four-passenger aircraft designed for urban transportation. Archer is further along in FAA certification and more likely to reach market first, potentially benefiting from increased public interest in flying vehicles.",
+   "publisher": {
+    "name": "The Motley Fool"
+   }
+  }
+ ],
+ "count": 2,
+ "_note": "Recorded from Massive on 2026-11-02 (Mon, 23:xx ET, market closed) by a throwaway script, key redacted by name and value; request_id dropped. Two rows, image and logo fields dropped."
+}

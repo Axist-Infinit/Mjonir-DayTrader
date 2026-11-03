@@ -1,0 +1,28 @@
+{
+ "afterHours": false,
+ "currencies": {
+  "crypto": "open",
+  "fx": "open"
+ },
+ "earlyHours": false,
+ "exchanges": {
+  "nasdaq": "closed",
+  "nyse": "closed",
+  "otc": "closed"
+ },
+ "indicesGroups": {
+  "s_and_p": "closed",
+  "societe_generale": "closed",
+  "msci": "closed",
+  "ftse_russell": "closed",
+  "mstar": "open",
+  "mstarc": "open",
+  "cccy": "open",
+  "cgi": "closed",
+  "nasdaq": "closed",
+  "dow_jones": "closed"
+ },
+ "market": "closed",
+ "serverTime": "2026-11-02T23:32:53-05:00",
+ "_note": "Recorded from Massive on 2026-11-02 (Mon, 23:xx ET, market closed) by a throwaway script, key redacted by name and value; request_id dropped."
+}

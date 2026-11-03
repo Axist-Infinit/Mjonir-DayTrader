@@ -6,6 +6,11 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "tests", "fixtures")
 
+# Hermetic: the suite runs from the repo root, where `mjonir.bridge calendar` writes trader/calendar.json
+# and the owner may export TRADER_SOURCE=massive. Neither may reach a test that did not ask for it.
+os.environ["TRADER_CALENDAR"] = os.devnull
+os.environ.pop("TRADER_SOURCE", None)
+
 
 def load(folder, name):
     path = os.path.join(ROOT, folder, name + ".py")
