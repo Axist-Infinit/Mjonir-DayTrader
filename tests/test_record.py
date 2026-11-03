@@ -407,6 +407,32 @@ class Decisions(Base):
         self.assertNotIn("Record:", out)
         self.assertEqual(len(L.load(self.rec)["rows"]), 2)
 
+    def test_no_then_yes_then_no_ends_skipped(self):
+        date = "2026-10-27"
+        s = cents_session(date, 14)
+        doc, got = self.trigger("SYN", s, date + " 10:00")
+        order = self.order(got["row"])
+        e = os.path.join(self.d, "entry.json")
+        with open(e, "w") as fh:
+            json.dump(doc, fh)
+        fp = ticket.fingerprint(order)
+        no = {"taken": False, "reason": "no", "broker_fingerprint": fp}
+        yes = {"taken": True, "reason": "approved", "broker_fingerprint": fp, "qty": 10.0, "max_loss_usd": 25.0}
+        for i, dec in enumerate((no, yes, no)):
+            out = record.decide(order, dec, date, entry.parse_now(date + " 10:05"), e, "/nonexistent", self.cfg, None,
+                                self.rec)      # the same second each time: the sequence number tells them apart
+            self.assertEqual(out["state"], "decided", (i, out))
+        b = L.load(self.rec)
+        rows = b["decisions"][got["id"]]
+        self.assertEqual([r["decision"]["taken"] for r in rows], [False, True, False])
+        self.assertEqual(len(set(r["id"] for r in rows)), 3)
+        self.assertIs(L.decision_of(b, b["triggers"][0])["taken"], False)
+        h = sha(self.tp)
+        out = record.decide(order, no, date, entry.parse_now(date + " 10:09"), e, "/nonexistent", self.cfg, None,
+                            self.rec)
+        self.assertEqual(out["state"], "exists")
+        self.assertEqual(sha(self.tp), h)
+
     def test_no_trigger_no_record(self):
         order = {"symbol": "ZZZ", "side": "buy", "qty": "1", "plan": {"entry_time": "10:15 AM", "setup": "orb"}}
         got = record.decide(order, {"taken": False, "reason": "no"}, "2026-10-27", entry.parse_now("2026-10-27 10:20"),

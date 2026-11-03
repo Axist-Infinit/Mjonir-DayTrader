@@ -35,7 +35,9 @@ Costs (mjonir/costs.py, the "costs" block of trader/config.json): slippage by
 the stock's ADV$ tier (Massive under --source massive; otherwise unverified,
 the most expensive tier), the NBBO half spread (live and fresh, else the
 default and the spread gate unverified), and the commission on both orders
-over the share basis (--shares, or floor(max_loss_per_trade_usd / risk)). The
+over the share basis (--shares, or floor(max loss / risk), the max loss from
+mjonir.costs.max_loss_basis: a percent config's derived one, else
+max_loss_per_trade_usd). The
 plan prints gross and net reward:risk, net = (reward - round trip) / (risk +
 round trip), and writes the cost card into the plan. Under min_reward_risk on
 the NET basis ("min_reward_risk_basis": "net", the default) the plan is
@@ -73,7 +75,7 @@ BACKOFF = 5.0
 HOSTS = ("query2", "query1")
 INTERVALS = {"1m": 60, "5m": 300}
 DEFAULTS = {"flat_by": "15:55", "min_reward_risk": 1.0, "min_reward_risk_basis": "net",
-            "max_loss_per_trade_usd": 50, "costs": None}
+            "max_loss_per_trade_usd": 50, "costs": None, "sizing": None, "limits_pct": None}
 ATR_BARS = 14
 DATR_DAYS = 14
 MIN_RISK_PCT = Decimal("0.05")     # risk under 0.05% of the price is inside the spread's noise
@@ -618,6 +620,8 @@ def read_config(path):
         for k in DEFAULTS:
             if doc.get(k) is not None:
                 cfg[k] = doc[k]
+        if isinstance(doc.get("sizing"), dict):   # a percent config: no upstream dollar default beside it
+            cfg["max_loss_per_trade_usd"] = doc.get("max_loss_per_trade_usd")
     if cfg.get("min_reward_risk_basis") not in ("net", "gross"):
         raise PlanError("min_reward_risk_basis is net or gross, not %r" % cfg.get("min_reward_risk_basis"))
     return cfg
@@ -747,7 +751,10 @@ def build_plan(a, now_utc):
         if getattr(a, "shares", None):
             shares, how, ml = int(a.shares), "--shares %d" % int(a.shares), None
         else:
-            ml = float(cfg.get("max_loss_per_trade_usd") or costs.DEFAULT_MAX_LOSS_USD)
+            try:
+                ml = costs.max_loss_basis(cfg)
+            except costs.CostError as e:
+                raise PlanError("costs: %s" % e)
             shares, how = costs.shares_basis(risk, ml)
         adv, adv_note, quote, quote_note = cost_inputs(info["symbol"], day, now_utc)
         try:
@@ -886,7 +893,7 @@ def main(argv=None):
     p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X, none (with --exit close)")
     p.add_argument("--exit", choices=["target", "close"], help="close: no target, out at the stop or flat-by close")
     p.add_argument("--shares", type=int, help="the share count the commission is spread over (default: from "
-                                              "max_loss_per_trade_usd / risk)")
+                                              "the config's max loss / risk)")
     p.add_argument("--no-costs", action="store_true", help="gross only: no slippage, spread or commission")
     p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
     p.add_argument("--config", default="trader/config.json")

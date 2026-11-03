@@ -106,8 +106,10 @@ def control_id(trigger, draw, seed):
     return _h("control|%s|%s|%s" % (trigger, draw, seed))
 
 
-def decision_id(trigger, taken, reason, fingerprint):
-    return _h("decision|%s|%s|%s|%s" % (trigger, taken, reason, fingerprint or ""))
+def decision_id(trigger, taken, reason, fingerprint, at, seq=0):
+    """A decision row's id: the trigger, the decision, when it was recorded and its place among that trigger's
+    decisions, so a no, a yes and a no again are three rows (the last one wins)."""
+    return _h("decision|%s|%s|%s|%s|%s|%s" % (trigger, taken, reason, fingerprint or "", at, seq))
 
 
 # ---------------------------------------------------------------- the book

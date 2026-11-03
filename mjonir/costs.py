@@ -170,6 +170,25 @@ def spread_gate(half_bps, state, entry, risk, max_frac):
                       % (spread, "over" if st == "block" else "within", 100 * max_frac, risk, limit)}
 
 
+def max_loss_basis(cfg=None):
+    """The max loss a plan's commission share basis comes from: the derived max loss of a percent config
+    (mjonir/limits.py, a "sizing" block: the trade notional x max_loss_pct_of_notional, or a stricter legacy
+    max_loss_per_trade_usd), else the config's max_loss_per_trade_usd, else upstream's $50. trader-exit, the
+    time machine and the record call this one function."""
+    from . import limits as _limits
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if _limits.is_notional(cfg):
+        try:
+            return float(_limits.derive_limits(cfg)["max_loss_usd"])
+        except _limits.LimitsError as e:
+            raise CostError("config: %s" % e)
+    v = cfg.get("max_loss_per_trade_usd")
+    try:
+        return float(v) if v not in (None, "", 0, False) else DEFAULT_MAX_LOSS_USD
+    except (TypeError, ValueError):
+        raise CostError("max_loss_per_trade_usd must be a number, got %r" % (v,))
+
+
 def shares_basis(risk, max_loss_usd=None):
     """(shares, how): the share count a plan's commission is spread over before trader-budget sizes it,
     floor(max loss / risk a share), at least 1."""

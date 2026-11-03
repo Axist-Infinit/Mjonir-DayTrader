@@ -405,6 +405,72 @@ class Checks(unittest.TestCase):
         self.assertIn("over your $1,000 max loss per trade", "\n".join(res["results"][0]["reasons"]))
 
 
+class ShareBasis(unittest.TestCase):
+    """M2: trader-exit, the time machine and the record spread the commission over the same share basis, the
+    percent config's derived max loss (costs.max_loss_basis), else the legacy key, else upstream's $50."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)
+        self.exitp = load("trader-exit", "exit")
+        self.exitp.cost_inputs = lambda sym, day, now: (ADV, "served", None, "no live quote (served)")
+        self.tm = load("trader-timemachine", "timemachine")
+        self.record = load("trader-record", "record")
+        with open(os.path.join(FIX, "trader-budget", "config-upstream.json")) as fh:
+            self.legacy = json.load(fh)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def exit_card(self, cfg_path, target="2R"):
+        code, out, err = run(self.exitp, ["plan", "--symbol", "TSLA", "--entry", "364.18", "--or-high", "362.18",
+                                          "--or-low", "354.47", "--time", "10:15", "--entry-bar", "8", "--date",
+                                          "2026-10-19", "--now", "2026-10-19 10:16", "--target", target,
+                                          "--config", cfg_path, "--json"])
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_the_basis(self):
+        self.assertEqual(C.max_loss_basis(example()), 1000.0)
+        self.assertEqual(C.max_loss_basis(example(max_loss_per_trade_usd=50)), 50.0)     # the stricter
+        self.assertEqual(C.max_loss_basis(self.legacy), 50.0)
+        self.assertEqual(C.max_loss_basis({}), C.DEFAULT_MAX_LOSS_USD)
+        self.assertEqual(C.max_loss_basis({"max_loss_per_trade_usd": 80}), 80.0)
+        with self.assertRaises(C.CostError):
+            C.max_loss_basis(example(sizing={"trade_notional_usd": -1, "max_loss_pct_of_notional": 1}))
+
+    def test_exit_writes_the_170_share_card_under_the_percent_config(self):
+        plan = self.exit_card(EXAMPLE)
+        card = plan["costs"]
+        self.assertEqual((card["shares"], card["max_loss_usd"], card["shares_basis"]),
+                         (170, 1000.0, "floor(1000.00 max loss / 5.86 risk) = 170 shares"))
+        self.assertAlmostEqual(card["cost_r"], 0.089013, places=6)
+        self.assertAlmostEqual(plan["reward_risk_net"], 1.7548, places=4)     # (11.72 - 0.5216) / (5.86 + 0.5216)
+        legacy = os.path.join(self.d, "legacy.json")
+        with open(legacy, "w") as fh:
+            json.dump(self.legacy, fh)
+        self.assertEqual(self.exit_card(legacy)["costs"]["shares"], 8)
+
+    def test_the_three_cards_agree(self):
+        with open(PLAN) as fh:
+            bare = json.load(fh)                       # the reel's plan file at 2R: no cost card
+        bare.update(target=375.90, target_r=2.0, reward_risk=2.0)
+        legacy = os.path.join(self.d, "legacy.json")
+        with open(legacy, "w") as fh:
+            json.dump(self.legacy, fh)
+        for cfg, path, shares in ((example(), EXAMPLE, 170), (self.legacy, legacy, 8)):
+            ex = self.exit_card(path)["costs"]
+            tmc = self.tm.cost_card_for(self.tm.normalize_plan(bare), "auto", cfg, adv_usd=ADV)
+            rec, how = self.record.card_for(bare, cfg)
+            tm_unverified = self.tm.cost_card_for(self.tm.normalize_plan(bare), "auto", cfg)
+            self.assertEqual((ex["shares"], tmc["shares"], rec["shares"]), (shares,) * 3)
+            self.assertEqual(ex["cost_r"], tmc["cost_r"])
+            self.assertEqual((rec["cost_r"], rec["per_side_bps"]), (tm_unverified["cost_r"], tm_unverified["per_side_bps"]))
+            self.assertEqual(C.model_of(ex)["max_loss_usd"], C.model_of(tmc)["max_loss_usd"])
+
+
 class TicketPortfolio(unittest.TestCase):
     def test_a_percent_config_starts_the_paper_account_at_one_notional(self):
         d = tempfile.mkdtemp()

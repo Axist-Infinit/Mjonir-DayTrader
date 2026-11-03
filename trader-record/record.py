@@ -200,8 +200,8 @@ def card_for(plan, cfg):
             "the plan's cost card" if isinstance(plan["costs"], dict) else "off in the plan")
     costs = _measure("costs")
     entry, stop = float(plan["entry"]), float(plan["stop"])
-    ml = (cfg or {}).get("max_loss_per_trade_usd") or costs.DEFAULT_MAX_LOSS_USD
     try:
+        ml = costs.max_loss_basis(cfg)
         shares, how = costs.shares_basis(entry - stop, ml)
         card = costs.cost_card(entry, stop, plan.get("target"), shares, cfg=cfg,
                                adv_note="unverified: the plan carries no cost card", max_loss_usd=float(ml))
@@ -328,12 +328,13 @@ def record_trigger(doc, plan=None, decision=None, config=None, source="yahoo", n
 
 def append_decision(book, t, decision, now_utc, record_dir=None):
     ledger = _measure("ledger")
+    seq = len(book["decisions"].get(t["id"]) or [])
     did = ledger.decision_id(t["id"], decision.get("taken"), decision.get("reason"),
-                             decision.get("broker_fingerprint"))
+                             decision.get("broker_fingerprint"), iso(now_utc), seq)
     tp, _ = ledger.paths(record_dir)
     now_d = ledger.decision_of(book, t)
     same = all(now_d.get(k) == decision.get(k) for k in ("taken", "reason", "broker_fingerprint"))
-    if did in book["ids"] or same:
+    if same:      # the trigger's current decision already says this: a re-run appends nothing
         return {"state": "exists", "message": "that decision is already in %s for %s (trigger id %s)" % (
             tp, t.get("symbol"), t["id"])}
     row = {"schema": ledger.SCHEMA, "kind": "decision", "id": did, "paired_id": t["id"], "recorded_at": iso(now_utc),

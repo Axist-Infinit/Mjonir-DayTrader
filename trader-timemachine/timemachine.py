@@ -930,8 +930,8 @@ def cost_card_for(plan, costs_arg="auto", cfg=None, adv_usd=None, adv_note=None)
     costs = _measure("costs")
     long = plan["side"] == "buy"
     risk = (plan["entry"] - plan["stop"]) if long else (plan["stop"] - plan["entry"])
-    ml = (cfg or {}).get("max_loss_per_trade_usd") or costs.DEFAULT_MAX_LOSS_USD
     try:
+        ml = costs.max_loss_basis(cfg)     # a percent config: the derived max loss (mjonir/limits.py)
         shares, how = costs.shares_basis(risk, ml)
         card = costs.cost_card(plan["entry"], plan["stop"], plan["target"], shares, adv_usd=adv_usd, cfg=cfg,
                                long=long, adv_note=adv_note, max_loss_usd=float(ml))
