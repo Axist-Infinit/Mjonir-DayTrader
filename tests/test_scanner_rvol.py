@@ -354,6 +354,23 @@ class Cli(unittest.TestCase):
         self.assertIn("Stage 1 (replay, --shortlist 2)", out)
         self.assertIn("Stage 2: 5-minute bars for 2 names", err)
 
+    def test_the_order_is_cancelled_at_entry_until_not_the_config_window(self):
+        # PREREG section 4.1 ENTRY_UNTIL: 15:30 ET (12:30 on an early close) whatever no_entries_after says
+        os.makedirs("trader")
+        with open("trader/config.json", "w") as fh:
+            json.dump({"no_entries_after": "15:00"}, fh)
+        code, out, err = run(["rvol", "--source", "massive", "--symbols", "UPP,DWN", "--now", "2026-10-19 09:40",
+                              "--record-dir", self.rec])
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(self.rec, "triggers.jsonl")) as fh:
+            rows = [json.loads(x) for x in fh]
+        self.assertEqual(rows[0]["trigger"]["order"]["cancel_at"], "15:30")
+        with open("trader/watchlist.json") as fh:
+            wl = json.load(fh)
+        self.assertEqual([h["trigger"]["until"] for h in wl["hits"]], ["15:30"])
+        self.assertEqual(scan.rvol_entry_until(dt.date(2026, 11, 27)), "12:30")   # an early close
+        self.assertEqual(scan.rvol_entry_until(dt.date(2026, 11, 25)), "15:30")
+
     def test_a_late_live_scan_records_nothing(self):
         code, out, err = run(["rvol", "--source", "massive", "--symbols", "UPP,DWN", "--now", "2026-10-19 09:46",
                               "--record-dir", self.rec])

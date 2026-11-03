@@ -1090,6 +1090,8 @@ def _p(x):
 RVOL_FROM = datetime.time(9, 35)     # the 9:30 bar is complete
 RVOL_RECORD_BY = datetime.time(9, 45)  # a live list goes into the forward record only from a scan made by then
 RVOL_SETUP = "rvol_orb5"
+RVOL_ENTRY_UNTIL = "15:30"        # PREREG section 4.1 ENTRY_UNTIL: the order is cancelled after this bucket,
+RVOL_ENTRY_UNTIL_EARLY = "12:30"  # or this one on an early close; fixed by the prereg, not the config's window
 RVOL_NOTE = ("The RVOL list is a hypothesis under test (docs/PREREG_RVOL_ORB.md), not a signal: nothing in it "
              "says a name will move. Education and tooling, not financial advice.")
 RVOL_VS_STUDY = ("The live list ranks a snapshot first and exact first bars second, on Massive's adjusted bars; it "
@@ -1157,6 +1159,13 @@ def rvol_symbols(a):
     return out
 
 
+def rvol_entry_until(day):
+    """The prereg's ENTRY_UNTIL (section 4.1) as HH:MM for `day`: 15:30 ET, 12:30 ET on an early close. Fixed by
+    the prereg, so the config's no_entries_after never moves it."""
+    hours = session(day)
+    return RVOL_ENTRY_UNTIL_EARLY if hours and hours[1] == EARLY else RVOL_ENTRY_UNTIL
+
+
 def rvol_entry_doc(r, day, now, cancel_at):
     """The order the forward record takes for one up first bar (docs/PREREG_RVOL_ORB.md section 4.5): ARMED at
     9:35, a buy-stop at the 9:30 bar's high plus a tick (`level`), cancelled at `cancel_at`; no fill yet, so no
@@ -1197,7 +1206,7 @@ def rvol_record(a, doc, day, now, local, live):
         return ["record: not recorded: the scan ran at %s ET, after %s; the record takes a 9:35 entry only from a "
                 "scan made by then." % (clock_label(local), clock_label(RVOL_RECORD_BY))]
     out = []
-    cancel_at = str(read_config(a.config).get("no_entries_after") or "15:30")
+    cancel_at = rvol_entry_until(day)
     for r in rows:
         try:
             got = _record_module().record_trigger(
@@ -1209,7 +1218,7 @@ def rvol_record(a, doc, day, now, local, live):
     return out
 
 
-def merge_watchlist(path, doc, now, cancel_at="15:30"):
+def merge_watchlist(path, doc, now, cancel_at=RVOL_ENTRY_UNTIL):
     """The fires into the watchlist as rvol_orb5 hits, beside the hits already there (the daily scan's): an earlier
     rvol tag or hit is dropped first, so the file holds today's list only."""
     old = None
@@ -1298,7 +1307,7 @@ def cmd_rvol(a):
     if not a.no_write:
         doc["_path"] = a.write
         write_json(a.write, dict((k, v) for k, v in doc.items() if k != "_path"))
-        merge_watchlist(a.watchlist_out, doc, now, str(read_config(a.config).get("no_entries_after") or "15:30"))
+        merge_watchlist(a.watchlist_out, doc, now, rvol_entry_until(day))
     doc.pop("_path", None)
     lines = rvol_record(a, doc, day, now, local, live)
     for ln in lines:
@@ -1336,8 +1345,9 @@ def cmd_rvol(a):
                                                        _p(r["first_bar"]["c"]),
                                                        ("at %s" % _p(r["level"])) if r["fire"] else "none"))
         print("%d of the %d closed their 9:30 bar above its open: %d orders (setup %s), each a buy-stop at its 9:30 "
-              "high plus a tick, live until no_entries_after; a fill is read when the record scores the day%s"
-              % (len(doc["fires"]), len(doc["rows"]), len(doc["fires"]), RVOL_SETUP,
+              "high plus a tick, live until %s ET (the prereg's ENTRY_UNTIL); a fill is read when the record "
+              "scores the day%s"
+              % (len(doc["fires"]), len(doc["rows"]), len(doc["fires"]), RVOL_SETUP, rvol_entry_until(day),
                  (": " + ", ".join(doc["fires"]) + ".") if doc["fires"] else "."))
     else:
         print("No eligible name: the list is empty.")
