@@ -87,6 +87,14 @@ data.source and the adjustment basis come from that call, never from the flag,
 and a Yahoo history and a Massive one are never pooled. ADV$ for the slippage
 tier comes from Massive under --source massive; otherwise it is unverified (the
 most expensive tier). --no-costs turns costs off.
+The entry window: --no-entries-after HH:MM (default the config's
+no_entries_after, else 15:30; on a 1:00 p.m. early close it moves up three
+hours, as trader-entry moves it) caps the bars the history's rule may fire on
+and the random-entry control's entry bars, as the entry timer and the
+forward record do; 16:00 is upstream's (no cap). --until is the last bar each
+trade is scored to (default the 16:00 close); give the plan's flat-by
+(--until 15:55) to score the way the plan exits; a later --until prints a
+notice.
 Times are New York (ET) wall-clock; --now "2026-10-19 10:15" pins the clock.
 """
 
@@ -576,13 +584,16 @@ def _ci(stats, rs, seed):
 
 
 def history_replay(sessions, rule, last, side="buy", cost_model=None, gap_fill="open", control_draws=0,
-                   symbol="", seed=19, lasts=None, entry_shift=0.0, summary=True, control_bar="random"):
+                   symbol="", seed=19, lasts=None, entry_shift=0.0, summary=True, control_bar="random",
+                   entry_until=None, entry_untils=None):
     """The plan's rule on every past session given (full and early closes): entry = the first bar after
     the opening range to close beyond it (up to the session's last bar), then mjonir.outcomes.score_trade
     (the stop first, the target, else the close at the last bar). lasts: {date: last bar} for the early
     closes. Each trade is charged its own cost_r once (cost_model None = costs off). With control_draws
     K, K random-entry control trades a firing session (mjonir/control.py); control_bar="rule" pins them to
-    the rule's own bar (the delta-0 pin). summary=False skips the intervals (the sensitivity re-runs)."""
+    the rule's own bar (the delta-0 pin). summary=False skips the intervals (the sensitivity re-runs).
+    entry_until (entry_untils {date: bar} for the early closes): the last bar the rule may fire on and a
+    control may enter on (the no-entries-after window); None = up to the session's last bar (upstream)."""
     outcomes, stats, control = _measure("outcomes"), _measure("stats"), _measure("control")
     long = side == "buy"
     n = rule["or_minutes"] // 5
@@ -591,7 +602,9 @@ def history_replay(sessions, rule, last, side="buy", cost_model=None, gap_fill="
     trades, ctrl, skipped = [], {}, {"risk_floor": 0, "no_eligible_bar": 0}
     for d, D in sessions:
         ls = lasts.get(d, last)
-        rt = rule_trade(D, rule, n, ls, long, entry_shift)
+        eu = (entry_untils or {}).get(d, entry_until)
+        fire_last = ls if eu is None else min(ls, eu)
+        rt = rule_trade(D, rule, n, fire_last, long, entry_shift)
         if rt is None:
             continue
         kk, e, st, t = rt
@@ -607,7 +620,7 @@ def history_replay(sessions, rule, last, side="buy", cost_model=None, gap_fill="
                        "_entry": e, "_bar": kk})
         if control_draws:
             got, why = control.draw_controls(D, symbol, d, seed, control_draws, n, ls, e, st, rule.get("target_r"),
-                                             cost_r_of, gap_fill, long, entry_until=ls,
+                                             cost_r_of, gap_fill, long, entry_until=fire_last,
                                              force_bar=kk if control_bar == "rule" else None)
             for key, v in why.items():
                 skipped[key] += v
@@ -675,13 +688,15 @@ def _control_summary(stats, trades, ctrl, skipped, draws, seed):
                     "of the entry, the same target multiple and last bar; seed %s:symbol:date a session" % seed}
 
 
-def sensitivity(sessions, rule, last, side, cost_model, gap_fill, lasts, base, tick=TICK):
+def sensitivity(sessions, rule, last, side, cost_model, gap_fill, lasts, base, tick=TICK, entry_until=None,
+                entry_untils=None):
     """The one-tick sensitivity: the history re-scored with the entry `tick` higher and lower. A flip is a
     date whose outcome changes (a trade that no longer has a valid stop counts as a flip to "none")."""
     was = {t["date"]: t["outcome"] for t in base["trades"]}
     out = {"tick": tick, "of": len(was)}
     for name, shift in (("up", tick), ("down", -tick)):
         h = history_replay(sessions, rule, last, side, cost_model, gap_fill, 0, lasts=lasts, entry_shift=shift,
+                           entry_until=entry_until, entry_untils=entry_untils,
                            summary=False)
         now = {t["date"]: t["outcome"] for t in h["trades"]}
         flipped = sorted(d for d in was if now.get(d, "none") != was[d])
@@ -957,8 +972,20 @@ def data_basis(meta, source):
     return src, {"adjusted": adj, "as_of": mj.get("as_of"), "basis": basis}
 
 
+def entry_window_bar(cut_min, early):
+    """The last bar an entry may close on for a no-entries-after time: on a 1:00 p.m. early close a cut at
+    or after 13:00 moves up three hours (15:30 -> 12:30), as trader-entry's early_cutoff and the forward record
+    move it. 15:30 is bar 71; 16:00 is bar 77, the session's last (upstream: no cap)."""
+    close = EARLY_MIN if early else CLOSE_MIN
+    if cut_min >= close:
+        cut_min -= CLOSE_MIN - close
+        if cut_min <= OPEN_MIN:
+            cut_min = close
+    return (cut_min - OPEN_MIN) // 5 - 1
+
+
 def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=None, source="yahoo",
-                 costs="auto", gap_fill="open", control_draws=3, cfg=None):
+                 costs="auto", gap_fill="open", control_draws=3, cfg=None, no_entries_after=None):
     """Chart JSON text + a normalized plan -> the timemachine.json document. costs: "auto" (the plan's
     cost card, else the defaults with ADV unverified), a card dict, or None (off: gross only)."""
     if not 1 <= replays <= 1000000:
@@ -1029,12 +1056,19 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     hist_sessions = sorted(sessions + early_sessions)
     le = early_last(until_min, early)
     lasts = {d: le for d, _ in early_sessions}
+    eu = eus = window_doc = None
+    if no_entries_after is not None:     # None: fires up to each session's last bar (upstream)
+        cut = parse_clock(no_entries_after, "--no-entries-after")
+        eu = entry_window_bar(cut, False)
+        eus = {d: entry_window_bar(cut, True) for d, _ in early_sessions}
+        window_doc = {"no_entries_after": clock24(cut), "bar": eu, "early_close_bar": entry_window_bar(cut, True)}
     if rule:
         plan_out["stop_rule"] = rule["stop_rule"]
         history = history_replay(hist_sessions, rule, last, plan["side"], cost_model, gap_fill, control_draws, sym,
-                                 seed, lasts)
+                                 seed, lasts, entry_until=eu, entry_untils=eus)
+        history["entry_window"] = window_doc
         history["sensitivity"] = sensitivity(hist_sessions, rule, last, plan["side"], cost_model, gap_fill, lasts,
-                                             history)
+                                             history, entry_until=eu, entry_untils=eus)
         history["baseline"] = baseline_replay(hist_sessions, rule, last, plan["side"], cost_model, gap_fill, lasts,
                                               seed)
     else:
@@ -1177,6 +1211,10 @@ def report(doc):
     lines.append("  Data: %s (%s); %d early-close session(s) used, %d incomplete dropped."
                  % (d.get("source"), (d.get("adjustment") or {}).get("basis"), len(d.get("early_close_used") or []),
                     len(d.get("incomplete_dropped") or [])))
+    ew = h.get("entry_window")
+    if ew:
+        lines.append("  Entry window: the rule fires, and a control enters, on bars closing by %s (bar %d; bar %d on an "
+                     "early close); scored to %s." % (ew["no_entries_after"], ew["bar"], ew["early_close_bar"], until))
     lines += ["", doc["verdict_history"]["text"], doc["verdict_control"]["text"], ""]
     lines += [
         "%s replays of the rest of the session, %s to %s (%d five-minute bars), seed %d."
@@ -1305,8 +1343,17 @@ def compute(a):
             else:
                 note = "unverified: --source yahoo has no ADV (the most expensive tier)"
         card = cost_card_for(plan, "auto", cfg, adv, note)
+    fb = plan.get("flat_by")
+    try:
+        later = fb and parse_clock(a.until or "16:00", "--until") > parse_clock(fb, "the plan's flat_by")
+    except TMError:
+        later = False
+    if later:
+        print("timemachine.py: note: --until %s is later than the plan's flat-by %s: the history scores each trade "
+              "past the time the plan exits (give --until %s)" % (a.until or "16:00", fb, fb), file=sys.stderr)
+    nea = getattr(a, "no_entries_after", None) or cfg.get("no_entries_after") or "15:30"
     return time_machine(text, plan, now, a.replays, a.seed, a.window, a.until, source, card, a.gap_fill,
-                        a.control_draws, cfg)
+                        a.control_draws, cfg, no_entries_after=nea)
 
 
 def cmd_run(a):
@@ -1372,6 +1419,9 @@ def main(argv=None):
         p.add_argument("--gap-fill", choices=["open", "stop"], default="open",
                        help="a bar opening through the stop fills at its open (default) or at the stop (upstream)")
         p.add_argument("--control-draws", type=int, default=3, help="random-entry control trades a firing session")
+        p.add_argument("--no-entries-after", metavar="HH:MM",
+                       help="the last entry bar's close for the history and the control (default the config's "
+                            "no_entries_after, else 15:30; 16:00 = upstream, no cap)")
         p.add_argument("--config", default="trader/config.json", help="the costs block and the max loss")
         p.add_argument("--now", help='pretend it is this time ("2026-10-19 10:15" New York, or ISO with Z)')
 

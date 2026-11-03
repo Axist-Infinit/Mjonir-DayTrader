@@ -24,7 +24,12 @@ derive_limits(cfg) -> the dollar knobs:
 floors(cfg) are read in either mode; a floor that is absent is off.
 """
 
+import sys
+
 MODES = ("notional", "legacy")
+SIZING_KEYS = ("trade_notional_usd", "max_loss_pct_of_notional")
+#: the dollar keys a percent config may still carry (null = not set): never filled from a script's DEFAULTS
+LEGACY_KEYS = ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_order_usd", "max_trades_per_day", "budget")
 LIMITS_PCT_DEFAULTS = {"daily_loss": 1.0, "weekly_loss": 2.0, "max_consecutive_losses": 3,
                        "pause_sessions_after_streak": 1, "max_trades_per_day": 3}
 FLOOR_KEYS = ("min_price", "min_adv_usd", "max_chase_pct", "no_averaging_down")
@@ -85,6 +90,17 @@ def _legacy(cfg, key):
         raise LimitsError("%s must be a number, got %r" % (key, v))
 
 
+def unknown_keys(cfg):
+    """Warnings for keys the sizing, limits_pct and floors blocks do not know (a typo is otherwise silent)."""
+    out = []
+    for block, known in (("sizing", SIZING_KEYS), ("limits_pct", tuple(LIMITS_PCT_DEFAULTS)), ("floors", FLOOR_KEYS)):
+        b = (cfg or {}).get(block)
+        if isinstance(b, dict):
+            for k in sorted(set(b) - set(known)):
+                out.append("%s.%s is not a key this pack reads (it knows %s): ignored" % (block, k, ", ".join(known)))
+    return out
+
+
 def derive_limits(cfg):
     """The dollar knobs from the percent blocks (see the module docstring). Returns {mode, trade_notional_usd,
     max_loss_pct_of_notional, max_loss_usd, daily_loss_pct, daily_loss_usd, weekly_loss_pct, weekly_loss_usd,
@@ -92,6 +108,9 @@ def derive_limits(cfg):
     floors, from, warnings}. Bad values raise LimitsError naming the key."""
     cfg = cfg or {}
     fl = floors(cfg)
+    unknown = unknown_keys(cfg)
+    for w in unknown:
+        sys.stderr.write("mjonir.limits: %s\n" % w)
     if not is_notional(cfg):
         if isinstance(cfg.get("limits_pct"), dict):
             raise LimitsError("limits_pct are percents of sizing.trade_notional_usd: add the sizing block")
@@ -99,7 +118,7 @@ def derive_limits(cfg):
                 "daily_loss_usd": _legacy(cfg, "max_daily_loss_usd"), "weekly_loss_usd": None,
                 "max_trades_per_day": cfg.get("max_trades_per_day"), "max_consecutive_losses": None,
                 "pause_sessions_after_streak": None, "max_order_usd": _legacy(cfg, "max_order_usd"),
-                "position_cap_usd": None, "floors": fl, "from": {}, "warnings": []}
+                "position_cap_usd": None, "floors": fl, "from": {}, "warnings": list(unknown)}
     s = cfg["sizing"]
     notional = _num(s, "trade_notional_usd", "sizing", positive=True)
     pct = _num(s, "max_loss_pct_of_notional", "sizing", hi=100.0, positive=True)
@@ -118,7 +137,7 @@ def derive_limits(cfg):
            "daily_loss_usd": round(notional * daily_pct / 100.0, 2), "weekly_loss_pct": weekly_pct,
            "weekly_loss_usd": round(notional * weekly_pct / 100.0, 2), "max_trades_per_day": trades,
            "max_consecutive_losses": streak, "pause_sessions_after_streak": pause, "max_order_usd": notional,
-           "position_cap_usd": notional, "floors": fl, "warnings": [],
+           "position_cap_usd": notional, "floors": fl, "warnings": list(unknown),
            "from": {"max_loss_usd": "sizing.max_loss_pct_of_notional %g%% of the %s trade notional" % (pct, nm),
                     "daily_loss_usd": "limits_pct.daily_loss %g%% of %s" % (daily_pct, nm),
                     "weekly_loss_usd": "limits_pct.weekly_loss %g%% of %s" % (weekly_pct, nm),

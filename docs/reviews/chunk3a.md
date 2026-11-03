@@ -511,3 +511,81 @@ Money only past the gate; the gate is not a forecast.
 - **Not done here:** 3.3 to 3.5 (the RVOL prereg, scanner, study); the desk (chunk 4). No Kalex store was opened; the
   two live sessions in `~/Odyssey`, `~/Kalex` and `~/Infinit` were not touched (the key was read from `~/Infinit/.env`
   by mjonir for 4.4 only, never printed).
+
+## 7. Review fixes (3a review: HOLD on two MUSTs, then APPROVE WITH SHOULDs)
+
+Two commits on `feat/c3-record`: `e25464f` (M1, M2: 576 OK, 13.6 s) and the commit that adds this section (the
+SHOULDs, the NITs, the docs: 589 OK, about 14.4 s). The lead authorised edits to `trader-exit/exit.py` (M2) and
+`trader-timemachine/timemachine.py` (M2, S3) for this round only. Section 6's owed share-basis item is M2, done here;
+sections 4 and 6 keep the numbers as first printed (the 8-share card).
+
+| item | change | pinned by |
+| --- | --- | --- |
+| M1 decision ids | `ledger.decision_id(trigger, taken, reason, fingerprint, at, seq)`: the record time and the decision's place among the trigger's decisions; `append_decision` drops the `did in ids` clause and keeps `same` (a decision equal to the current one appends nothing) | `test_record.Decisions.test_no_then_yes_then_no_ends_skipped` (three rows in one second, distinct ids, ends `taken: False`; a re-sent no leaves the hash unchanged) |
+| M2 share basis | `costs.max_loss_basis(cfg)`: a percent config's `derive_limits(cfg)["max_loss_usd"]`, else `max_loss_per_trade_usd`, else $50; called by `exit.py build_plan`, `timemachine.cost_card_for`, `record.card_for`; exit's `read_config` carries `sizing` / `limits_pct` and gives a percent config no $50 default. The reel's card under the example config: 170 shares, cost_r 0.089013, 2R net reward:risk 1.7548 (was 8, 0.1297, 1.66) | `test_limits.ShareBasis` (the basis in every case; exit's 170-share card; the three cards agree on the percent config and give 8 on the legacy one); the SIM_* pin re-run (held) |
+| S1 ids and lock | `ledger.load` raises naming both lines when any id in triggers.jsonl repeats; `ledger.locked(d)` holds an `fcntl.flock` on triggers.jsonl (opened to append) around load and append in `record_trigger`, `decide` and `score_day` | `ReviewFixes.test_an_id_written_twice_names_both_lines`, `test_the_lock_excludes_a_second_writer` (a non-blocking flock fails while held), `test_two_writers_at_once_append_one_trigger` (four threads, one row) |
+| S2 chase reference | size.py writes `entry_plan` (the trigger) into the order's plan when it sized at another price; check.py measures the chase from `entry_plan`, else `entry`; an order sized at the trigger is unchanged (upstream's bracket pins hold) | `test_limits.Checks.test_the_chase_is_measured_from_the_trigger` (sized at 366.00, fresh 367.00: BLOCK against the 364.18 trigger) |
+| S3 windows | timemachine: `--no-entries-after HH:MM` (default the config's no_entries_after, else 15:30; early close moved up three hours, `entry_window_bar` = record's `entry_until`) caps the rule's fire bars and the control's entry bars; the function default stays None (upstream); the history carries `entry_window` and the report prints it; a `--until` later than the plan's flat-by prints a notice on stderr (not in `warnings`, which upstream pins empty); RUNBOOK's command gets `--until 15:55`; the 16:00 default stays | `Windows.test_the_window_bar_is_the_records`, `test_a_fire_after_the_window_is_not_a_trade`, `test_the_cli_default_and_the_until_notice`; `SimPin` now passes `--no-entries-after 16:00` (the session's last bar) and is bit for bit |
+| S4 default source | `record.py score` defaults to yahoo (or TRADER_SOURCE), like every script | `ReviewFixes.test_score_reads_yahoo_by_default` |
+| S5 a finished day | once the session is over (a later New York day, or 30 minutes past the close) a trigger whose bars are missing is scored `no_data` ("bars missing: first missing bar i ..."); while live it stays pending; a source that could not answer stays pending | `ReviewFixes.test_bars_missing_after_the_session_are_no_data` (16:20 pending, 16:30 no_data, a later run appends nothing) |
+| S6 empty record | a record folder with no triggers file is an empty record: daily, weekly and streak pass ("no trigger recorded yet in <dir>"); no folder stays unverified | `test_limits.Checks.test_daily_loss_unverified_without_a_record` (both) |
+| S7 averaging down | a taken trade in the symbol today in the record and no portfolio file: unverified ("a taken SYM trade today in the record; no portfolio to compare the cost basis") | `Checks.test_averaging_down_with_a_taken_trade_today_and_no_portfolio` |
+| S8 exit guard | `tests/_load.py` registers an atexit guard: the repo's `record/` recomputed, on a change "TESTS WROTE record/" and `os._exit(3)` (checked by hand: a probe file gives exit 3); `test_record.Base.tearDown` and `test_limits.Checks.tearDown` assert the snapshot; `test_zz` kept | the guard itself; the two tearDowns |
+| S9 one rule per gate | more than one rule hash in the selection: GATE NOT YET "N rules in the record; the gate reads one: use --setup or --rule", each rule's own gate printed beneath (`gate.per_rule`); `--rule HASH` on report and journal | `ReviewFixes.test_one_rule_per_gate` (a 2R default and a 1R plan on one trigger) |
+| S10 late fills | RUNBOOK: fills typed after the 16:30 score do not reach the record yet; a `fill` row kind is chunk 4's; never edit a score line by hand | docs |
+| NIT line buffering | `append_rows` opens with `buffering=1`: one write a row | |
+| NIT unknown keys | `limits.unknown_keys`: an unknown `sizing` / `limits_pct` / `floors` key is a warning in `derive_limits` and on stderr | `Derive.test_unknown_keys_are_warned` |
+| NIT test env | `test_record.Base.tearDown` pops `TRADER_RECORD_DIR` when it was unset | |
+| NIT load_config | size.py applies DEFAULTS to a percent config too, except the legacy dollar keys (`limits.LEGACY_KEYS`), which come only from the file | `Derive.test_size_loads_defaults_but_no_legacy_dollar_key` |
+
+**Assertions edited in this round** (no upstream assertion):
+
+| test | old | new | reason |
+| --- | --- | --- | --- |
+| test_mjonir_stats `Verdicts.test_the_two_year_reading` (chunk 2's) | the README quotes the chunk 2 "Below zero: 285 fires, -0.125 ..." text verbatim | the chunk 2 text is still recomputed and asserted; the README must now quote the text recomputed from this round's percent-config run (281 fires, -0.08823, [-0.19327, +0.02325], cost 0.1418: unverified/straddles) | the lead asked the README to carry the new reading |
+| test_timemachine_measure `SimPin` (chunk 2's) | argv without a window | adds `--no-entries-after 16:00` (upstream: no cap) | S3: the CLI default is now 15:30; the hashes are bit for bit with 16:00 (they also held at 15:30 on this fixture) |
+| test_record `AppendOnly.test_open_modes` (this chunk's) | one `"a"` open, in ledger.py | `"a"` opens only in ledger.py (append and lock) | S1's lock |
+| test_limits `test_daily_loss_unverified_without_a_record` (this chunk's) | "no record at" | "no record folder at", plus the empty-folder pass | S6 |
+
+**The two-year TSLA reading under the example (percent) config**, live (paced, read-only; 10 aggregate pages and the
+daily bars for the ADV, cold; the second plan from the cache), `timemachine.py run --plan <plan> --source massive
+--years 2 --control-draws 3 --until 15:55 --now "2026-10-19 10:15" --json --config <the example>`; the 1R plan is the
+reel's plan file, the 2R plan the same with target 375.90. First at `e25464f` (M2 alone: no entry window), then with
+this round's code (S3: the config's 15:30 window):
+
+```text
+== m2-1r
+card: shares 170 (floor(1000.00 max loss / 5.86 risk) = 170 shares), cost_r 0.0890, per_side_bps 7.0, ADV 12729948354
+until 15:55 | triggered 284: target 128, stop 116, close 40 | cost_r_mean 0.1417
+net -0.082 [-0.193, +0.029] n 284 | gross +0.060 [-0.051, +0.171]
+control delta -0.050 [-0.165, +0.064] over 284 sessions (rule -0.082, control -0.032)
+verdict_history unverified/straddles: Edge not distinguishable from zero: 284 fires, net average -0.082 R a trade (95% bootstrap [-0.193, +0.029]); the interval includes 0. Decided: 128 of 244 hit the target (52.5%, 95% Wilson [46.2%, 58.6%]) against a net break-even of 57.1% at 1R after costs (the history's own mean round trip, 0.142 R).
+verdict_control unverified/straddles: Not distinguishable from the random-entry control: net delta -0.050 R a trade (95% bootstrap [-0.165, +0.064]) over 284 paired sessions; the interval includes 0.
+== m2-2r
+card: shares 170 (floor(1000.00 max loss / 5.86 risk) = 170 shares), cost_r 0.0890, per_side_bps 7.0, ADV 12729948354
+until 15:55 | triggered 284: target 59, stop 131, close 94 | cost_r_mean 0.1417
+net -0.048 [-0.188, +0.097] n 284 | gross +0.093 [-0.044, +0.235]
+control delta -0.065 [-0.208, +0.081] over 284 sessions (rule -0.048, control +0.017)
+verdict_history unverified/straddles: Edge not distinguishable from zero: 284 fires, net average -0.048 R a trade (95% bootstrap [-0.188, +0.097]); the interval includes 0. Decided: 59 of 190 hit the target (31.1%, 95% Wilson [24.9%, 38.0%]) against a net break-even of 38.1% at 2R after costs (the history's own mean round trip, 0.142 R).
+verdict_control unverified/straddles: Not distinguishable from the random-entry control: net delta -0.065 R a trade (95% bootstrap [-0.208, +0.081]) over 284 paired sessions; the interval includes 0.
+== s3-1r
+card: shares 170 (floor(1000.00 max loss / 5.86 risk) = 170 shares), cost_r 0.0890, per_side_bps 7.0, ADV 12729948354
+until 15:55 | triggered 281: target 127, stop 116, close 38 | cost_r_mean 0.1418
+net -0.088 [-0.193, +0.023] n 281 | gross +0.054 [-0.052, +0.166]
+control delta -0.061 [-0.172, +0.056] over 281 sessions (rule -0.088, control -0.027)
+verdict_history unverified/straddles: Edge not distinguishable from zero: 281 fires, net average -0.088 R a trade (95% bootstrap [-0.193, +0.023]); the interval includes 0. Decided: 127 of 243 hit the target (52.3%, 95% Wilson [46.0%, 58.5%]) against a net break-even of 57.1% at 1R after costs (the history's own mean round trip, 0.142 R).
+verdict_control unverified/straddles: Not distinguishable from the random-entry control: net delta -0.061 R a trade (95% bootstrap [-0.172, +0.056]) over 281 paired sessions; the interval includes 0.
+== s3-2r
+card: shares 170 (floor(1000.00 max loss / 5.86 risk) = 170 shares), cost_r 0.0890, per_side_bps 7.0, ADV 12729948354
+until 15:55 | triggered 281: target 59, stop 131, close 91 | cost_r_mean 0.1418
+net -0.054 [-0.188, +0.092] n 281 | gross +0.088 [-0.046, +0.232]
+control delta -0.074 [-0.215, +0.078] over 281 sessions (rule -0.054, control +0.020)
+verdict_history unverified/straddles: Edge not distinguishable from zero: 281 fires, net average -0.054 R a trade (95% bootstrap [-0.188, +0.092]); the interval includes 0. Decided: 59 of 190 hit the target (31.1%, 95% Wilson [24.9%, 38.0%]) against a net break-even of 38.1% at 2R after costs (the history's own mean round trip, 0.142 R).
+verdict_control unverified/straddles: Not distinguishable from the random-entry control: net delta -0.074 R a trade (95% bootstrap [-0.215, +0.078]) over 281 paired sessions; the interval includes 0.
+```
+
+With this round's code the 1R reading is unverified/straddles, as is the 2R one, and both control verdicts are
+unverified/straddles. For comparison, chunk 2's two-year 1R run (the $50 share basis, so 8 shares; the 16:00 last bar;
+no window) read fail/below: 285 fires, -0.125 [-0.235, -0.016], mean round trip 0.181 R. The README quotes the final
+texts. The SIM_* pin held bit for bit after M2 and after S3 (`SimPin`, `Reel.test_bit_for_bit_with_the_reel_sim` and
+`Reel.test_the_history_replay` pass).

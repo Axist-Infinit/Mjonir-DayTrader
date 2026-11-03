@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import os
 import shutil
+import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +42,17 @@ RECORD_BEFORE = record_snapshot()
 RECORD_DIR = tempfile.mkdtemp(prefix="mjonir-record-tests-")
 os.environ["TRADER_RECORD_DIR"] = RECORD_DIR
 atexit.register(shutil.rmtree, RECORD_DIR, True)
+
+
+def _record_guard():
+    """At exit, whatever ran (one file or the suite): the repo's record/ must be what it was, or the run fails."""
+    if record_snapshot() != RECORD_BEFORE:
+        sys.stderr.write("TESTS WROTE record/: the repo's forward record changed during the test run\n")
+        sys.stderr.flush()
+        os._exit(3)
+
+
+atexit.register(_record_guard)
 
 
 def load(folder, name):

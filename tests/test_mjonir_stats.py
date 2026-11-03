@@ -110,9 +110,14 @@ class Verdicts(unittest.TestCase):
                                     "-0.016]); the whole interval is under 0. Decided: 130 of 246 hit the target "
                                     "(52.8%, 95% Wilson [46.6%, 59.0%]) against a net break-even of 59.1% at 1R after "
                                     "costs (the history's own mean round trip, 0.181 R).")
+        # chunk 3a review M2: the README now quotes the two-year reading under the example (percent) config,
+        # docs/reviews/chunk3a.md section 7; recomputed here from that run's own numbers
+        v3 = S.verdict_history({"target": 127, "stop": 116, "triggered": 281,
+                                "expectancy": ex(281, -0.08823, -0.19327, 0.02325)}, 1.0, 0.1418)
+        self.assertEqual((v3["state"], v3["reason"]), ("unverified", "straddles"))
         with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
             readme = " ".join(fh.read().split())
-        self.assertIn(v["text"], readme)                                  # the README quotes it verbatim
+        self.assertIn(v3["text"], readme)                                 # the README quotes it verbatim
 
     def test_the_states_come_from_the_expectancy_only(self):
         # a decided rate far above its break-even does not pass a history whose net interval straddles 0

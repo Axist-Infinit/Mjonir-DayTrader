@@ -105,8 +105,11 @@ class SimPin(unittest.TestCase):
         d = tempfile.mkdtemp()
         try:
             out = os.path.join(d, "tm.json")
+            # upstream's mechanics: no costs, the stop filled at the stop, and (chunk 3 review S3) no entry-window
+            # cap, 16:00 being the session's last bar
             code, text, err = run(["run", "--plan", PLAN_PATH, "--offline", TSLA, "--now", NOW, "--no-costs",
-                                   "--gap-fill", "stop", "--sessions", "60", "--write", out])
+                                   "--gap-fill", "stop", "--sessions", "60", "--no-entries-after", "16:00",
+                                   "--write", out])
             self.assertEqual(code, 0, err)
             with open(out) as fh:
                 doc = json.load(fh)

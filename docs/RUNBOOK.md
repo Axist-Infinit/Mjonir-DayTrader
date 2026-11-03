@@ -84,9 +84,11 @@ The full hazard list is in CLAUDE.md.
     from Massive's daily ATR; trader-budget writes an OTO order and the
     ticket says to flatten by the flat-by);
   - time machine: `python3 trader-timemachine/timemachine.py run --source
-    massive --years 2 --control-draws 3 --write`: the verdict reads the
-    history, net of costs, with its interval, and the control delta; the
-    Monte Carlo is a shape diagnostic only;
+    massive --years 2 --control-draws 3 --until 15:55 --write` (`--until`
+    the plan's flat-by; the entry window is the config's no_entries_after,
+    as the record's): the verdict reads the history, net of costs, with its
+    interval, and the control delta; the Monte Carlo is a shape diagnostic
+    only;
   - size: `python3 trader-budget/size.py --write` sizes net of costs from the
     `sizing` block: shares from the $100,000 trade notional capped by the 1%
     max loss (the round trip and both commissions included); it prints the
@@ -104,7 +106,10 @@ The full hazard list is in CLAUDE.md.
   trader-exit's default plan for the setup unless `--plan` names one;
   `ticket.py approve` and `decline` append the decision; `ticket.py fill`
   holds the fills `record.py score` reads for a taken trade. Enter the fills
-  before the 16:30 score: a score line is written once.
+  before the 16:30 score: fills typed after it do not reach the record yet (a
+  score line is written once). A `fill` row kind (append-only, paired to the
+  trigger, preferred over the score's broker block) is chunk 4's. Never edit a
+  score line by hand.
 
 ## During the trade: manage
 

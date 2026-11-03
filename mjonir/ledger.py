@@ -6,8 +6,10 @@ writes and reads them, trader-risk/check.py reads them (one definition, P8).
     read_rows(path)          every row in file order; [] when the file is absent; a line that is not a JSON
                              object with an id, or a last line without its newline, raises RecordError
                              naming the file and the line (P7: the record is fixed by hand, never rewritten)
-    append_rows(path, rows)  one line a row, opened with mode "a" and nothing else (P7)
-    load(d)                  the book: trigger, control and decision rows, the scores by id
+    append_rows(path, rows)  one line a row, opened with mode "a" and nothing else (P7), line-buffered
+    locked(d)                an exclusive flock on triggers.jsonl while a writer loads and appends
+    load(d)                  the book: trigger, control and decision rows, the scores by id; an id written
+                             twice in either file raises RecordError naming both lines
     trigger_id, rule_hash, control_id, decision_id   identifiers only (sha256, hex, truncated)
     decision_of(book, t)     the last decision row for a trigger, else its inline decision
     realized(book, a, b)     taken trades dated a..b: realized net dollars of the scored ones plus the
@@ -20,9 +22,15 @@ not), "control" (a random-entry control drawn on that trigger's session, paired_
 written first). scores.jsonl holds one line per scored id (a trigger or a control), written once.
 """
 
+import contextlib
 import hashlib
 import json
 import os
+
+try:
+    import fcntl
+except ImportError:      # not on Windows: no lock, one writer at a time by habit
+    fcntl = None
 
 SCHEMA = 1
 TRIGGERS = "triggers.jsonl"
@@ -78,11 +86,34 @@ def append_rows(path, rows):
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
+    with open(path, "a", buffering=1, encoding="utf-8") as fh:     # line-buffered: one write a row
         for r in rows:
             clean = {k: v for k, v in r.items() if not k.startswith("_")}
             fh.write(json.dumps(clean, sort_keys=True) + "\n")
     return len(rows)
+
+
+@contextlib.contextmanager
+def locked(d=None, create=True):
+    """Hold an exclusive lock on the record (flock on triggers.jsonl, opened to append, so nothing is
+    rewritten) while a writer loads the book and appends: two writers at once cannot both decide an id is
+    new. create=False: no file yet, nothing to lock."""
+    tp, _ = paths(d)
+    if not create and not os.path.exists(tp):
+        yield
+        return
+    dd = os.path.dirname(tp)
+    if dd:
+        os.makedirs(dd, exist_ok=True)
+    fh = open(tp, "a", encoding="utf-8")
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
 
 
 # ---------------------------------------------------------------- identifiers
@@ -128,7 +159,12 @@ def load(d=None):
             "rows": rows, "triggers": [], "controls": [], "decisions": {}, "ids": set(), "scores": scores,
             "as_of": None}
     stamps = []
+    first = {}
     for r in rows:
+        if r["id"] in first:
+            raise RecordError("%s line %d writes id %s a second time (line %d has it): an id is written once"
+                              % (tp, r["_line"], r["id"], first[r["id"]]))
+        first[r["id"]] = r["_line"]
         book["ids"].add(r["id"])
         kind = r.get("kind")
         if kind == "trigger":

@@ -82,15 +82,18 @@ to the REALIZED one below. New checks, each pass, block or unverified:
   adv_floor       the ADV$ (the plan's cost card, or Massive under --source
                   massive) under floors.min_adv_usd; no ADV: unverified
   chase           the price now (the limit price, a fresh trader/prices.json
-                  price, or the live ask) over the trigger x (1 +
+                  price, or the live ask) over the trigger (the plan's
+                  entry_plan when trader-budget sized at a higher price) x (1 +
                   floors.max_chase_pct / 100); no fresh price: unverified
   averaging_down  a buy in a symbol trader/portfolio.json holds above the
-                  price (floors.no_averaging_down)
+                  price (floors.no_averaging_down); a taken trade in the
+                  symbol today in the record and no portfolio: unverified
   daily_loss      the realized net dollars of today's taken trades in the
                   forward record (record.py score) plus the planned net max
                   loss of the taken ones not scored yet, plus this order, over
-                  limits_pct.daily_loss of the notional; no record or an
-                  unreadable one: unverified
+                  limits_pct.daily_loss of the notional; a record folder with
+                  no trigger yet is an empty record; no folder, or an
+                  unreadable record: unverified
   weekly_loss     the same from Monday through today, limits_pct.weekly_loss
   loss_streak     the last limits_pct.max_consecutive_losses taken and scored
                   trades all lost net: blocked until
@@ -215,7 +218,7 @@ def _ck(name, state, reason):
     return {"name": name, "state": state, "reason": reason}
 
 
-def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, have_portfolio):
+def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, have_portfolio, taken_today=False):
     """price_floor, adv_floor, chase, averaging_down: each {name, state pass|block|unverified, reason}; a floor
     that is not set is not checked."""
     out = []
@@ -251,7 +254,7 @@ def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, hav
                                                                                     money(floor))))
     if fl.get("max_chase_pct") is not None:
         pct = float(fl["max_chase_pct"])
-        trig = _f(plan.get("entry"))
+        trig = _f(plan.get("entry_plan")) or _f(plan.get("entry"))     # the trigger, not the sizing price
         if not trig:
             out.append(_ck("chase", "unverified", "the order's plan has no trigger price to measure a chase from"))
         else:
@@ -271,7 +274,10 @@ def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, hav
                 out.append(_ck("chase", "pass", "%s at %s (%s), the trigger %s, the limit %s" % (
                     sym, _p(price), basis, _p(trig), _p(lim))))
     if fl.get("no_averaging_down"):
-        if held <= 1e-9:
+        if held <= 1e-9 and taken_today and not have_portfolio:
+            out.append(_ck("averaging_down", "unverified", "a taken %s trade today in the record; no portfolio to "
+                                                           "compare the cost basis" % sym))
+        elif held <= 1e-9:
             out.append(_ck("averaging_down", "pass", "no %s position on record%s" % (
                 sym, "" if have_portfolio else " (no trader/portfolio.json)")))
         elif avg_cost is None:
@@ -295,8 +301,10 @@ def record_checks(book, book_err, lim, today, max_loss, batch_loss):
     """daily_loss and weekly_loss (REALIZED from the forward record) and loss_streak, in the percent mode."""
     ledger = _measure("ledger")
     out = []
-    why = book_err or (None if book["exists"] else "no record at %s yet (entry.py --record writes it on a trigger)"
-                       % book["triggers_path"])
+    # a record folder with no triggers file yet is an empty record (nothing taken); no folder at all is unverified
+    why = book_err or (None if book["exists"] or os.path.isdir(book["dir"]) else
+                       "no record folder at %s (entry.py --record makes it on a trigger)" % book["dir"])
+    empty = not why and not book["exists"]
     d = datetime.date.fromisoformat(today)
     monday = (d - datetime.timedelta(days=d.weekday())).isoformat()
     for name, start, cap, pct in (("daily_loss", today, lim["daily_loss_usd"], lim.get("daily_loss_pct")),
@@ -306,6 +314,12 @@ def record_checks(book, book_err, lim, today, max_loss, batch_loss):
             continue
         if max_loss is None:
             out.append(_ck(name, "unverified", "this order has no max loss to add (no stop or no price)"))
+            continue
+        if empty:
+            out.append(_ck(name, "block" if batch_loss + max_loss > cap + CENT else "pass",
+                           "no trigger recorded yet in %s; %s passed earlier in this batch plus %s for this one = %s; "
+                           "the limit is %s" % (book["dir"], money(batch_loss), money(max_loss),
+                                                money(batch_loss + max_loss), money(cap))))
             continue
         r = ledger.realized(book, start, today)
         if r["unknown"]:
@@ -325,9 +339,10 @@ def record_checks(book, book_err, lim, today, max_loss, batch_loss):
         if why:
             out.append(_ck("loss_streak", "unverified", "the streak cannot be read: %s" % why))
         else:
-            last = ledger.loss_streak(book, n)
+            last = None if empty else ledger.loss_streak(book, n)
             if last is None:
-                out.append(_ck("loss_streak", "pass", "no %d taken trades in a row lost" % n))
+                out.append(_ck("loss_streak", "pass", "no trigger recorded yet in %s" % book["dir"] if empty else
+                               "no %d taken trades in a row lost" % n))
             else:
                 passed = sum(1 for i in range(1, 400)
                              if datetime.date.fromisoformat(last) + datetime.timedelta(days=i) <= d
@@ -1000,8 +1015,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     if nbbo and nbbo.get("ask") and nbbo.get("t_ms") and \
                             abs((now_utc - datetime.datetime(1970, 1, 1)).total_seconds() * 1000 - nbbo["t_ms"]) <= 60000:
                         now_price = (float(nbbo["ask"]), "the live ask")
+                taken_today = bool(book) and any(
+                    t.get("date") == today and str(t.get("symbol") or "").upper() == sym and _measure("ledger").is_taken(
+                        book, t) for t in book["triggers"])
                 new = floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held0.get(sym, 0.0), basis0.get(sym),
-                                   portfolio is not None)
+                                   portfolio is not None, taken_today)
                 if pct_mode:
                     new += record_checks(book, book_err, lim, today, max_loss, batch_loss)
                 for ck in new:

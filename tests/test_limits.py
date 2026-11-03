@@ -16,6 +16,7 @@ import tempfile
 import unittest
 
 import _mj  # noqa: F401  (sys.path, throwaway data dirs, no key)
+import _load
 from _load import FIX, ROOT, load
 from mjonir import costs as C
 from mjonir import ledger as L
@@ -113,6 +114,36 @@ class Derive(unittest.TestCase):
             with self.assertRaises(LM.LimitsError) as cm:
                 LM.derive_limits(bad)
             self.assertIn(key, str(cm.exception))
+
+    def test_unknown_keys_are_warned(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            lim = LM.derive_limits(example(limits_pct={"daily_los": 1.0}, floors={"min_price": 5, "chase": 1}))
+        w = "\n".join(lim["warnings"])
+        self.assertIn("limits_pct.daily_los is not a key this pack reads", w)
+        self.assertIn("floors.chase is not a key this pack reads", w)
+        self.assertIn("mjonir.limits: limits_pct.daily_los", err.getvalue())
+        self.assertEqual(lim["daily_loss_usd"], 1000.0)               # the default stands
+
+    def test_size_loads_defaults_but_no_legacy_dollar_key(self):
+        d = tempfile.mkdtemp()
+        try:
+            p = os.path.join(d, "c.json")
+            c = example()
+            for k in ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_trades_per_day", "require_stop"):
+                c.pop(k)
+            with open(p, "w") as fh:
+                json.dump(c, fh)
+            cfg = size.load_config(p)
+            self.assertIs(cfg["require_stop"], True)                  # a DEFAULT the file left out
+            for k in LM.LEGACY_KEYS:
+                self.assertNotIn(k, cfg)
+            lim = LM.derive_limits(cfg)
+            self.assertEqual((lim["max_loss_usd"], lim["warnings"]), (1000.0, []))
+            self.assertEqual(size.load_config(os.path.join(ROOT, "trader-budget", "config.example.json"))
+                             ["max_loss_per_trade_usd"], None)
+        finally:
+            shutil.rmtree(d)
 
     def test_python_3_8(self):
         for name in ("limits.py", "ledger.py"):
@@ -228,6 +259,7 @@ class Checks(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.d)
+        self.assertEqual(_load.record_snapshot(), _load.RECORD_BEFORE)    # the repo's record/ untouched
 
     def run_check(self, now=NOW, cfg=None, prices=None, portfolio=None, order=None, rec="default", **kw):
         n = check.parse_now(now)
@@ -298,6 +330,27 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.states(res)["chase"], "pass")
         self.assertIn("the live ask", self.reason(res, "chase"))
 
+    def test_the_chase_is_measured_from_the_trigger(self):
+        o = size.bracket_order(size.size_trade(plan_2r(), example(), price=366.00, today="2026-10-19"))
+        self.assertEqual((o["plan"]["entry"], o["plan"]["entry_plan"]), (366.0, 364.18))
+        res = self.run_check(order=o, prices={"TSLA": 367.00}, cfg=example(block_on_unverified=False))
+        self.assertEqual(self.states(res)["chase"], "block")
+        self.assertIn("over the trigger 364.18, past the 0.5% chase limit (366.00)", self.reason(res, "chase"))
+        self.assertNotIn("entry_plan", self.order["plan"])        # sized at the trigger: the plan is unchanged
+
+    def test_averaging_down_with_a_taken_trade_today_and_no_portfolio(self):
+        rec_trade(self.rec, "2026-10-19", 0.0, scored=False, max_loss=1.0, time="09:50")
+        tp = L.paths(self.rec)[0]
+        rows = L.read_rows(tp)
+        self.assertEqual(rows[0]["symbol"], "X")
+        L.append_rows(tp, [dict(rows[0], id="tslatoday", symbol="TSLA")])
+        res = self.run_check(prices={"TSLA": 364.18})
+        self.assertEqual(self.states(res)["averaging_down"], "unverified")
+        self.assertIn("a taken TSLA trade today in the record; no portfolio", self.reason(res, "averaging_down"))
+        pf = {"cash": 50000, "positions": []}
+        self.assertEqual(self.states(self.run_check(portfolio=pf, prices={"TSLA": 364.18}))["averaging_down"], "pass")
+        self.assertEqual(self.states(self.run_check(now="2026-10-20 10:16"))["averaging_down"], "pass")   # not today
+
     def test_averaging_down(self):
         self.assertEqual(self.states(self.run_check())["averaging_down"], "pass")
         pf = {"cash": 50000, "positions": [{"ticker": "TSLA", "shares": 10,
@@ -330,7 +383,13 @@ class Checks(unittest.TestCase):
         res = self.run_check(rec=os.path.join(self.d, "nowhere"))
         st = self.states(res)
         self.assertEqual((st["daily_loss"], st["weekly_loss"], st["loss_streak"]), ("unverified",) * 3)
-        self.assertIn("no record at", self.reason(res, "daily_loss"))
+        self.assertIn("no record folder at", self.reason(res, "daily_loss"))
+        empty = os.path.join(self.d, "empty")
+        os.makedirs(empty)                         # a record folder with no triggers file: an empty record
+        res = self.run_check(rec=empty)
+        st = self.states(res)
+        self.assertEqual((st["daily_loss"], st["weekly_loss"], st["loss_streak"]), ("pass",) * 3)
+        self.assertIn("no trigger recorded yet in %s" % empty, self.reason(res, "daily_loss"))
         with open(L.paths(self.rec)[0], "a") as fh:
             fh.write("{broken\n")
         res = self.run_check()

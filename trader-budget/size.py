@@ -220,13 +220,15 @@ def read_json(path, what):
 
 
 def load_config(path):
-    """The config over DEFAULTS. A percent config (a "sizing" block) comes back as written: its dollar limits
-    are derived from the percents (mjonir/limits.py), never from upstream's dollar defaults."""
+    """The config over DEFAULTS. For a percent config (a "sizing" block) the legacy dollar keys come only from
+    the file: its dollar limits are derived from the percents (mjonir/limits.py), never from upstream's dollar
+    defaults."""
     cfg = dict(DEFAULTS)
     if path and os.path.exists(path):
         doc = read_json(path, "config")
         if isinstance(doc, dict) and isinstance(doc.get("sizing"), dict):
-            return doc
+            for k in _measure("limits").LEGACY_KEYS:     # set only when the file sets them
+                cfg.pop(k, None)
         cfg.update(doc)
     return cfg
 
@@ -666,6 +668,8 @@ def bracket_order(s):
     plan = {"entry": s["entry"], "stop": s["stop"], "target": s["target"],
             "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"], "setup": s["setup"],
             "entry_time": s["entry_time"], "flat_by": s["flat_by"]}
+    if s.get("entry_plan") is not None and abs(s["entry_plan"] - s["entry"]) > 0.005:
+        plan["entry_plan"] = s["entry_plan"]     # the trigger: sized at a higher price or a limit (the chase check)
     if s.get("costs"):
         plan.update(max_loss_gross=s["max_loss_gross"], costs=s["costs"])
     if oto:

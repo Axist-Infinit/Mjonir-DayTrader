@@ -16,6 +16,7 @@ import unittest
 
 import _mj  # noqa: F401  (sys.path, throwaway data dirs, no key)
 import synth
+import _load
 from _load import FIX, ROOT, load
 from mjonir import calendar as K
 from mjonir import costs as C
@@ -78,8 +79,12 @@ class Base(unittest.TestCase):
             json.dump(LIGHT, fh)
 
     def tearDown(self):
-        os.environ["TRADER_RECORD_DIR"] = self.saved_env
+        if self.saved_env is None:
+            os.environ.pop("TRADER_RECORD_DIR", None)
+        else:
+            os.environ["TRADER_RECORD_DIR"] = self.saved_env
         shutil.rmtree(self.d)
+        self.assertEqual(_load.record_snapshot(), _load.RECORD_BEFORE)    # the repo's record/ untouched
 
     def chart_file(self, sym, sessions, name=None):
         p = os.path.join(self.d, name or (sym + ".json"))
@@ -116,7 +121,7 @@ class AppendOnly(unittest.TestCase):
                             mode = kw.value.value
                     modes.append((os.path.basename(path), mode))
         self.assertEqual(sorted(set(m for _, m in modes)), ["a", "r"])
-        self.assertEqual([p for p, m in modes if m == "a"], ["ledger.py"])     # the one writer
+        self.assertEqual(sorted(set(p for p, m in modes if m == "a")), ["ledger.py"])   # the one writer (and its lock)
         for path in self.SOURCES:
             with open(path, encoding="utf-8") as fh:
                 src = re.sub(r'""".*?"""', "", fh.read(), flags=re.S)
@@ -501,6 +506,174 @@ class Decisions(Base):
         b = L.load(self.rec)
         self.assertAlmostEqual(L.realized(b, date, date)["realized_usd"],
                                round(sc["net_r"] * 5 * got["row"]["plan"]["risk_per_share"], 2))
+
+
+class ReviewFixes(Base):
+    """The chunk 3a review's SHOULDs on the record: duplicate ids, the lock, the default source, a finished
+    session with bars missing, one rule per gate."""
+
+    def test_an_id_written_twice_names_both_lines(self):
+        L.append_rows(self.tp, [{"id": "a", "kind": "trigger"}, {"id": "b", "kind": "control"},
+                                {"id": "a", "kind": "trigger"}])
+        with self.assertRaises(L.RecordError) as cm:
+            L.load(self.rec)
+        self.assertIn("line 3 writes id a a second time (line 1 has it)", str(cm.exception))
+
+    def test_the_lock_excludes_a_second_writer(self):
+        import fcntl
+        import threading
+        os.makedirs(self.rec)
+        held, done = threading.Event(), threading.Event()
+
+        def hold():
+            with L.locked(self.rec):
+                held.set()
+                done.wait(5)
+        th = threading.Thread(target=hold)
+        th.start()
+        held.wait(5)
+        with open(self.tp, "a") as fh:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done.set()
+        th.join(5)
+        with open(self.tp, "a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)      # free again
+
+    def test_two_writers_at_once_append_one_trigger(self):
+        import threading
+        s = cents_session("2026-10-19", 21)
+        ch = entry.parse_chart(synth.chart_text("SYN", [s]), "SYN")
+        now = entry.parse_now("2026-10-19 10:00")
+        doc = entry.entry_doc(entry.evaluate(ch, now), now)
+        states = []
+        ths = [threading.Thread(target=lambda: states.append(record.record_trigger(
+            doc, None, None, self.cfg, "yahoo", now, record_dir=self.rec)["state"])) for _ in range(4)]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join(10)
+        self.assertEqual(sorted(states), ["appended", "exists", "exists", "exists"])
+        self.assertEqual(len(L.load(self.rec)["triggers"]), 1)
+
+    def test_score_reads_yahoo_by_default(self):
+        seen = []
+        saved = record.session_bars
+
+        def fake(symbol, day, source="yahoo", offline=None, now_utc=None):
+            seen.append(source)
+            raise record.RecordFail("served")
+        record.session_bars = fake
+        saved_src = os.environ.pop("TRADER_SOURCE", None)
+        try:
+            s = cents_session("2026-10-19", 22)
+            self.trigger("SYN", s, "2026-10-19 10:00")
+            code, out, _ = run(record, ["score", "--date", "2026-10-19", "--now", "2026-10-19 16:30",
+                                        "--record-dir", self.rec])
+            self.assertEqual((code, seen), (2, ["yahoo"]))
+            self.assertIn("unverified, not scored: served", out)      # could not ask: pending, never no_data
+        finally:
+            record.session_bars = saved
+            if saved_src is not None:
+                os.environ["TRADER_SOURCE"] = saved_src
+
+    def test_bars_missing_after_the_session_are_no_data(self):
+        date = "2026-10-22"
+        s = cents_session(date, 23)
+        _, got = self.trigger("SYN", s, date + " 15:00")
+        gappy = [b for b in s if b["slot"] != 30]          # a halt: the 12:00 bar never prints
+        f = self.chart_file("SYN", [gappy])
+        out = record.score_day(date, offline=f, now_utc=entry.parse_now(date + " 16:20"), record_dir=self.rec,
+                               state_path=None)
+        self.assertEqual(out["pending"], 1)                 # under 30 minutes past the close: still unverified
+        self.assertFalse(os.path.exists(self.sp))
+        out = record.score_day(date, offline=f, now_utc=entry.parse_now(date + " 16:30"), record_dir=self.rec,
+                               state_path=None)
+        self.assertEqual((out["pending"], out["appended"]["scores"], out["appended"]["triggers"]), (0, 1, 0))
+        sc = L.load(self.rec)["scores"][got["id"]]
+        self.assertEqual((sc["outcome"], sc["reason"]), ("no_data", "bars missing: first missing bar 30 (1 of the 77 "
+                                                                    "through the flat-by bar 76)"))
+        h = (sha(self.tp), sha(self.sp))
+        again = record.score_day(date, offline=f, now_utc=entry.parse_now("2026-10-23 09:00"), record_dir=self.rec,
+                                 state_path=None)
+        self.assertEqual((again["appended"], (sha(self.tp), sha(self.sp))), ({"triggers": 0, "scores": 0}, h))
+        rep = record.report_doc(L.load(self.rec), dt.date(2026, 10, 23))
+        self.assertEqual((rep["paper"]["n"], rep["counts"]["outcomes"]), (0, {"no_data": 1}))
+
+    def test_one_rule_per_gate(self):
+        date = "2026-10-26"
+        s = cents_session(date, 24)
+        doc, a = self.trigger("SYN", s, date + " 15:00")                  # trader-exit's 2R default
+        plan1r = dict(a["row"]["plan"], symbol="SYN", date=date, target=round(a["row"]["plan"]["entry"] +
+                                                                              a["row"]["plan"]["risk_per_share"], 2),
+                      target_r=1.0, stop_rule="or_mid", target_label="1R (one times the risk)", costs=None)
+        b = record.record_trigger(doc, plan1r, None, self.cfg, "yahoo", entry.parse_now(date + " 15:00"),
+                                  record_dir=self.rec)
+        self.assertEqual(b["state"], "appended")
+        self.assertNotEqual(a["row"]["rule_hash"], b["row"]["rule_hash"])
+        record.score_day(date, offline=self.chart_file("SYN", [s]), now_utc=entry.parse_now(date + " 16:30"),
+                         record_dir=self.rec, state_path=None)
+        code, out, _ = run(record, ["report", "--record-dir", self.rec, "--now", date + " 17:00"])
+        self.assertIn("GATE NOT YET: 2 rules in the record; the gate reads one: use --setup or --rule.", out)
+        for r in (a["row"], b["row"]):
+            self.assertIn("  rule %s (orb, stop or_mid, target %sR; 1 scored): GATE NOT YET: n 1 of the 40"
+                          % (r["rule_hash"], r["plan"]["target_r"]), out)
+        self.assertEqual(out.rstrip().splitlines()[-1], record.FOOTER)
+        doc1 = json.loads(run(record, ["report", "--record-dir", self.rec, "--now", date + " 17:00", "--json",
+                                       "--rule", b["row"]["rule_hash"]])[1])
+        self.assertEqual((doc1["counts"]["triggers"], doc1["paper"]["n"], doc1["filters"]["rule"]),
+                         (1, 1, b["row"]["rule_hash"]))
+        self.assertNotIn("rules in the record", doc1["gate"]["text"])
+        j = json.loads(run(record, ["journal", "--record-dir", self.rec, "--json", "--rule", a["row"]["rule_hash"]])[1])
+        self.assertEqual(j["blocks"]["undecided"]["n"], 1)
+
+
+class Windows(unittest.TestCase):
+    """S3: the time machine's entry window is the record's (no_entries_after), and 16:00 is upstream's."""
+
+    def late_session(self, date, slot=73):
+        s = cents_session(date, 31)
+        oh = max(b["h"] for b in s[:3])
+        for b in s[3:]:
+            b["c"] = min(b["c"], round(oh - 0.05, 2))
+            b["h"], b["l"] = max(b["h"], b["c"], b["o"]), min(b["l"], b["c"], b["o"])
+        s[slot]["c"] = round(oh + 0.5, 2)
+        s[slot]["h"] = max(s[slot]["h"], s[slot]["c"])
+        return s
+
+    def test_the_window_bar_is_the_records(self):
+        for cut, early in ((15 * 60 + 30, False), (15 * 60 + 30, True), (12 * 60, True), (16 * 60, False),
+                           (13 * 60, True), (10 * 60, False)):
+            self.assertEqual(tm.entry_window_bar(cut, early), record.entry_until("%02d:%02d" % divmod(cut, 60), early))
+        self.assertEqual((tm.entry_window_bar(930, False), tm.entry_window_bar(960, False)), (71, 77))
+
+    def test_a_fire_after_the_window_is_not_a_trade(self):
+        rule = {"setup": "orb", "or_minutes": 15, "stop_rule": "or_mid", "target_r": 2.0}
+        sess = [("2026-10-21", self.late_session("2026-10-21"))]
+        self.assertEqual(tm.history_replay(sess, rule, 76, summary=False)["triggered"], 1)       # upstream
+        self.assertEqual(tm.history_replay(sess, rule, 76, entry_until=77, summary=False)["triggered"], 1)
+        self.assertEqual(tm.history_replay(sess, rule, 76, entry_until=71, summary=False)["triggered"], 0)
+        early = [("2026-11-27", self.late_session("2026-11-27", slot=37)[:42])]
+        self.assertEqual(tm.history_replay(early, rule, 76, lasts={"2026-11-27": 40}, entry_until=71,
+                                           entry_untils={"2026-11-27": 35}, summary=False)["triggered"], 0)
+        ok = [("2026-10-21", self.late_session("2026-10-21", slot=60))]
+        h = tm.history_replay(ok, rule, 76, control_draws=40, symbol="SYN", entry_until=71)
+        self.assertEqual(h["triggered"], 1)
+        self.assertEqual(h["control"]["trades"], 40)
+
+    def test_the_cli_default_and_the_until_notice(self):
+        plan = os.path.join(FIX, "trader-budget", "plan-tsla.json")
+        tsla = os.path.join(FIX, "trader-timemachine", "TSLA-60d5m.json.gz")
+        base = ["run", "--plan", plan, "--offline", tsla, "--now", "2026-10-19 10:50", "--replays", "200", "--json",
+                "--config", os.path.join(ROOT, "trader-budget", "config.example.json")]
+        code, out, err = run(tm, base)
+        self.assertEqual(code, 0, err)
+        self.assertIn("--until 16:00 is later than the plan's flat-by 15:55", err)
+        self.assertEqual(json.loads(out)["history"]["entry_window"], {"no_entries_after": "15:30", "bar": 71,
+                                                                      "early_close_bar": 35})
+        code, out2, err = run(tm, base + ["--until", "15:55", "--no-entries-after", "16:00"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out2)["history"]["entry_window"]["bar"], 77)
 
 
 class Streak(unittest.TestCase):

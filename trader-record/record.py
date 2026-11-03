@@ -48,6 +48,14 @@ AND (the expectancy interval is wholly below 0, OR the delta interval is wholly 
 sessions); NOT YET otherwise, with the reasons. days = calendar days from the first trigger's date to today
 (New York). Every report ends with "Money only past the gate; the gate is not a forecast."
 
+Bars missing while the session can still change: not scored (unverified), run score again. Once it is over
+(a later New York day, or 30 minutes past the close) a trigger whose bars are still missing (a halt, a vendor
+gap) is scored no_data with the first missing bar, so the day is final. A source that could not answer at all
+stays unverified. --source defaults to yahoo (or TRADER_SOURCE), like every script.
+
+One rule per gate: when the record (or the --setup / --since selection) holds more than one rule hash, the gate
+reads NOT YET with that reason and prints each rule's own gate beneath it; --rule HASH reads one.
+
 Exit codes: add 0 = written or already there, 1 = an error; score 0 = every trigger of the day is scored,
 2 = some could not be scored yet (bars missing: unverified), 1 = an error; report and journal 0.
 """
@@ -310,16 +318,17 @@ def record_trigger(doc, plan=None, decision=None, config=None, source="yahoo", n
         plan, basis = rule_plan(doc, config, source, now_utc, now_text)
     cfg = read_json(config or "trader/config.json", "config", required=False) or {}
     row = build_trigger(doc, plan, basis, decision, now_utc, _window(config), bars_label, extra, notes, cfg)
-    book = ledger.load(record_dir)
     tp, _ = ledger.paths(record_dir)
-    if row["id"] in book["ids"]:
-        if decision and decision.get("taken") is not None:
-            got = append_decision(book, [t for t in book["triggers"] if t["id"] == row["id"]][0], decision,
-                                  now_utc, record_dir)
-            return dict(got, id=row["id"])
-        return {"state": "exists", "id": row["id"],
-                "message": "already in %s (id %s): a trigger is recorded once" % (tp, row["id"])}
-    ledger.append_rows(tp, [row])
+    with ledger.locked(record_dir):
+        book = ledger.load(record_dir)
+        if row["id"] in book["ids"]:
+            if decision and decision.get("taken") is not None:
+                got = append_decision(book, [t for t in book["triggers"] if t["id"] == row["id"]][0], decision,
+                                      now_utc, record_dir)
+                return dict(got, id=row["id"])
+            return {"state": "exists", "id": row["id"],
+                    "message": "already in %s (id %s): a trigger is recorded once" % (tp, row["id"])}
+        ledger.append_rows(tp, [row])
     what = "the plan from %s" % basis if plan is not None else "no plan (%s)" % basis
     return {"state": "appended", "id": row["id"], "row": row,
             "message": "recorded %s %s %s in %s (id %s), %s" % (row["symbol"], row["date"], row["trigger"]["time"],
@@ -327,6 +336,7 @@ def record_trigger(doc, plan=None, decision=None, config=None, source="yahoo", n
 
 
 def append_decision(book, t, decision, now_utc, record_dir=None):
+    """Append a decision row for trigger t (the caller holds ledger.locked and loaded `book` under it)."""
     ledger = _measure("ledger")
     seq = len(book["decisions"].get(t["id"]) or [])
     did = ledger.decision_id(t["id"], decision.get("taken"), decision.get("reason"),
@@ -380,13 +390,14 @@ def decide(order, decision, today, now_utc, entry_path="trader/entry.json", plan
         return {"state": "skipped", "message": "not recorded: no trigger time for %s (no matching %s and no entry "
                                                "time in the order's plan)" % (sym, entry_path)}
     key = (sym, today, setup, hhmm(_clock_min(when, "the trigger time")))
-    book = ledger.load(record_dir)
-    cands = [t for t in book["triggers"] if ledger.trigger_key(t) == key]
     full = dict(decision, order_plan={k: oplan.get(k) for k in ("entry", "stop", "target", "max_loss")})
-    if cands:
-        pick = next((t for t in cands if _same_plan(t, oplan)), cands[0])
-        full["plan_matches_record"] = _same_plan(pick, oplan)
-        return append_decision(book, pick, full, now_utc, record_dir)
+    with ledger.locked(record_dir, create=False):
+        book = ledger.load(record_dir)
+        cands = [t for t in book["triggers"] if ledger.trigger_key(t) == key]
+        if cands:
+            pick = next((t for t in cands if _same_plan(t, oplan)), cands[0])
+            full["plan_matches_record"] = _same_plan(pick, oplan)
+            return append_decision(book, pick, full, now_utc, record_dir)
     if doc is None:
         return {"state": "skipped", "message": "not recorded: no trigger row for %s %s %s in the record and no "
                                                "matching %s to write one from" % (sym, today, key[3], entry_path)}
@@ -504,10 +515,22 @@ def _score_row(kind, rid, t, res, k, last, info, now_utc):
             "source": {"bars": info["source"], "data": info.get("data_source"), "early_close": info["early"]}}
 
 
-def score_day(day, source="massive", offline=None, draws=1, now_utc=None, state_path="trader/state/broker.json",
+def score_day(day, source="yahoo", offline=None, draws=1, now_utc=None, state_path="trader/state/broker.json",
               record_dir=None, symbols=None):
     """Score every trigger recorded on `day` that has no score yet, and its control rows. Returns
-    {lines, appended, pending}. Ids already scored are skipped; nothing is rewritten."""
+    {lines, appended, pending}. Ids already scored are skipped; nothing is rewritten. Holds the record's lock."""
+    with _measure("ledger").locked(record_dir, create=False):
+        return _score_day(day, source, offline, draws, now_utc, state_path, record_dir, symbols)
+
+
+def session_over(day, now_utc, early):
+    """True once the session cannot change: a later New York day, or 30 minutes past its close."""
+    local = _entry().to_eastern(now_utc)
+    close = (EARLY_MIN if early else CLOSE_MIN) + 30
+    return local.date() > day or (local.date() == day and local.hour * 60 + local.minute >= close)
+
+
+def _score_day(day, source, offline, draws, now_utc, state_path, record_dir, symbols):
     ledger, costs, outcomes, control = (_measure("ledger"), _measure("costs"), _measure("outcomes"),
                                         _measure("control"))
     now_utc = now_utc or parse_now(None)
@@ -541,7 +564,8 @@ def score_day(day, source="massive", offline=None, draws=1, now_utc=None, state_
                 out["appended"]["scores"] += 1
                 out["lines"].append("%s: no plan to score (%s): written as no_data." % (label, t.get("plan_note")))
             continue
-        if have_score and all(c in book["ids"] and c in book["scores"] for c in cids):
+        if have_score and (book["scores"][t["id"]].get("outcome") == "no_data"
+                           or all(c in book["ids"] and c in book["scores"] for c in cids)):
             out["lines"].append("%s: already scored (%s, net %+.3f R); nothing appended." % (
                 label, book["scores"][t["id"]].get("outcome"), float(book["scores"][t["id"]].get("net_r") or 0)))
             continue
@@ -561,6 +585,19 @@ def score_day(day, source="massive", offline=None, draws=1, now_utc=None, state_
         k = int((t.get("trigger") or {}).get("bar_index") if k is None else k)
         last = last_bar(plan.get("flat_by"), info["early"])
         missing = [i for i in range(0, last + 1) if i not in slots]
+        if missing and session_over(day, now_utc, info["early"]):
+            if not have_score:     # a halt or a vendor gap: the day is final, so the trigger is too
+                ledger.append_rows(sp, [{"schema": 1, "id": t["id"], "kind": "trigger", "paired_id": None,
+                                         "scored_at": iso(now_utc), "date": t.get("date"), "symbol": t.get("symbol"),
+                                         "outcome": "no_data", "reason": "bars missing: first missing bar %d (%d of "
+                                                                         "the %d through the flat-by bar %d)"
+                                         % (missing[0], len(missing), last + 1, last),
+                                         "fill_basis": "paper", "broker": None,
+                                         "source": {"bars": info["source"], "data": info.get("data_source")}}])
+                out["appended"]["scores"] += 1
+                out["lines"].append("%s: no_data, the session is over and bars are missing (first missing: bar %d)."
+                                    % (label, missing[0]))
+            continue
         if missing:
             out["pending"] += 1
             out["lines"].append("%s: unverified, not scored: %d of the %d bars through the flat-by bar %d are not in "
@@ -641,9 +678,16 @@ def score_day(day, source="massive", offline=None, draws=1, now_utc=None, state_
 
 # ---------------------------------------------------------------- the report and the gate
 
-def _filtered(book, setup=None, since=None):
+def _filtered(book, setup=None, since=None, rule=None):
     return [t for t in book["triggers"] if (not setup or t.get("setup") == setup)
-            and (not since or str(t.get("date")) >= since)]
+            and (not since or str(t.get("date")) >= since) and (not rule or t.get("rule_hash") == rule)]
+
+
+def _rule_words(rule):
+    r = rule or {}
+    tr = r.get("target_r")
+    return "%s, stop %s, %s" % (r.get("setup"), r.get("stop_rule"), ("target %sR" % tr) if tr not in (None, "price")
+                                else ("target at a price" if tr == "price" else "no target"))
 
 
 def _ci(stats, rs):
@@ -688,9 +732,9 @@ def gate_of(n, days, first, exp, delta, floor):
     return {"state": "not_yet", "reasons": reasons, "text": "GATE NOT YET: " + "; ".join(reasons) + "."}
 
 
-def report_doc(book, today, setup=None, since=None):
+def report_doc(book, today, setup=None, since=None, rule=None):
     ledger, stats = _measure("ledger"), _measure("stats")
-    trig = _filtered(book, setup, since)
+    trig = _filtered(book, setup, since, rule)
     ids = set(t["id"] for t in trig)
     scores = book["scores"]
     paper = [(t, scores[t["id"]]) for t in trig if scores.get(t["id"], {}).get("outcome") in ledger.SCORED]
@@ -730,8 +774,16 @@ def report_doc(book, today, setup=None, since=None):
     rules = {}
     for t in trig:
         rules.setdefault(t.get("rule_hash"), {"rule": t.get("rule"), "n": 0})["n"] += 1
+    if len(rules) > 1:     # the gate reads one rule: mixed rules never pass or fail it together
+        per = []
+        for h in sorted(rules, key=str):
+            sub = report_doc(book, today, setup, since, rule=h)
+            per.append({"rule_hash": h, "rule": rules[h]["rule"], "n": sub["paper"]["n"], "gate": sub["gate"]})
+        why = "%d rules in the record; the gate reads one: use --setup or --rule" % len(rules)
+        gate = {"state": "not_yet", "reasons": [why], "text": "GATE NOT YET: %s." % why, "per_rule": per}
     return {
-        "created_by": "trader-record", "today": today.isoformat(), "filters": {"setup": setup, "since": since},
+        "created_by": "trader-record", "today": today.isoformat(),
+        "filters": {"setup": setup, "since": since, "rule": rule},
         "record": {"dir": book["dir"], "triggers_path": book["triggers_path"], "lines": len(book["rows"]),
                    "scores": len(scores), "as_of": book["as_of"]},
         "counts": {"triggers": len(trig), "outcomes": outcomes, "decisions": decisions,
@@ -758,8 +810,10 @@ def report_lines(doc):
     out = ["Forward record %s: %d lines, %d scores, as of %s. Today %s (New York)." % (
         doc["record"]["triggers_path"], doc["record"]["lines"], doc["record"]["scores"], doc["record"]["as_of"] or "-",
         doc["today"])]
-    if doc["filters"]["setup"] or doc["filters"]["since"]:
-        out.append("Filtered: setup %s, since %s." % (doc["filters"]["setup"] or "any", doc["filters"]["since"] or "the start"))
+    f = doc["filters"]
+    if f["setup"] or f["since"] or f.get("rule"):
+        out.append("Filtered: setup %s, since %s, rule %s." % (f["setup"] or "any", f["since"] or "the start",
+                                                               f.get("rule") or "any"))
     oc = c["outcomes"]
     out.append("Triggers: %d recorded; scored %d target, %d stop, %d close; %d no data; %d not scored yet." % (
         c["triggers"], oc.get("target", 0), oc.get("stop", 0), oc.get("close", 0), oc.get("no_data", 0),
@@ -800,11 +854,12 @@ def report_lines(doc):
     out.append("Days: %d since the first trigger (%s); the gate needs %d." % (doc["days"], doc["first_trigger"] or "none",
                                                                             GATE_DAYS))
     if len(c["rules"]) > 1:
-        out.append("Rules in this record: %d (%s); use --setup to read one." % (
-            len(c["rules"]), ", ".join("%s n %d" % (h, v["n"]) for h, v in sorted(c["rules"].items()))))
+        out.append("Rules in this record: %d; the figures above mix them, the gate does not." % len(c["rules"]))
     out.append(doc["note"])
     out.append("")
     out.append(doc["gate"]["text"])
+    for p in doc["gate"].get("per_rule") or []:
+        out.append("  rule %s (%s; %d scored): %s" % (p["rule_hash"], _rule_words(p["rule"]), p["n"], p["gate"]["text"]))
     out.append(doc["footer"])
     return out
 
@@ -830,9 +885,9 @@ def _block(stats, rows):
             "mfe_mean_r": sum(float(s.get("mfe_r") or 0) for _, s, _ in rows) / len(rows)}
 
 
-def journal_doc(book, today, setup=None, since=None):
+def journal_doc(book, today, setup=None, since=None, rule=None):
     ledger, stats = _measure("ledger"), _measure("stats")
-    trig = _filtered(book, setup, since)
+    trig = _filtered(book, setup, since, rule)
     groups = {"taken": [], "skipped": [], "undecided": []}
     for t in trig:
         s = book["scores"].get(t["id"])
@@ -845,7 +900,8 @@ def journal_doc(book, today, setup=None, since=None):
             groups["skipped"].append((t, s, float(s["net_r"])))
         else:
             groups["undecided"].append((t, s, float(s["net_r"])))
-    out = {"created_by": "trader-record", "today": today.isoformat(), "filters": {"setup": setup, "since": since},
+    out = {"created_by": "trader-record", "today": today.isoformat(),
+           "filters": {"setup": setup, "since": since, "rule": rule},
            "basis": {"taken": "realized: the broker's fills where entered, else the paper score",
                      "skipped": "paper: the rule's score", "undecided": "paper: the rule's score"},
            "blocks": {k: _block(stats, v) for k, v in groups.items()}, "by_setup": {}, "by_month": {},
@@ -926,7 +982,7 @@ def cmd_score(a):
     except ValueError:
         raise RecordFail("--date wants YYYY-MM-DD, not %r" % day)
     syms = [s.strip().upper() for s in a.symbols.split(",")] if a.symbols else None
-    src = a.source or os.environ.get("TRADER_SOURCE") or "massive"
+    src = a.source or os.environ.get("TRADER_SOURCE") or "yahoo"
     res = score_day(day, src, a.offline, a.control_draws, now, a.state, a.record_dir, syms)
     for line in res["lines"]:
         print(line)
@@ -940,7 +996,7 @@ def cmd_score(a):
 def cmd_report(a):
     now = parse_now(a.now)
     book = _measure("ledger").load(a.record_dir)
-    doc = report_doc(book, today_et(now), a.setup, a.since)
+    doc = report_doc(book, today_et(now), a.setup, a.since, a.rule)
     if a.json:
         print(json.dumps(doc, indent=2, default=str))
     else:
@@ -951,7 +1007,7 @@ def cmd_report(a):
 def cmd_journal(a):
     now = parse_now(a.now)
     book = _measure("ledger").load(a.record_dir)
-    doc = journal_doc(book, today_et(now), a.setup, a.since)
+    doc = journal_doc(book, today_et(now), a.setup, a.since, a.rule)
     if a.json:
         print(json.dumps(doc, indent=2, default=str))
     else:
@@ -982,7 +1038,7 @@ def main(argv=None):
     common(p)
     p.add_argument("--date", help="YYYY-MM-DD (default today, New York)")
     p.add_argument("--offline", metavar="PATH", help="a saved chart JSON (.json/.json.gz) or a folder of <SYM>.json")
-    p.add_argument("--source", choices=["yahoo", "massive"], help="default massive (or TRADER_SOURCE)")
+    p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo (or TRADER_SOURCE), like every script")
     p.add_argument("--control-draws", type=int, default=1)
     p.add_argument("--symbols", help="only these, comma-separated")
     p.add_argument("--state", default="trader/state/broker.json", help="the hand-entered fills (ticket.py fill)")
@@ -992,6 +1048,7 @@ def main(argv=None):
         common(p)
         p.add_argument("--setup")
         p.add_argument("--since", help="YYYY-MM-DD")
+        p.add_argument("--rule", metavar="HASH", help="one rule's triggers (the rule_hash a trigger row carries)")
         p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:

@@ -128,19 +128,29 @@ scripts; docs/reviews/chunk2.md has the commands and the full output.
   fires print -0.508. The 2R rule on the same 60 days, ADV from Massive:
   net average -0.352 (-0.678 to +0.017, n 33), cannot judge; 3 of 20
   decided against a 40.0 % net break-even.
-- **The two-year reading.** `timemachine.py run --source massive --years 2`
-  (499 sessions, 2024-10-21 to 2026-10-16, five early closes scored to 1:00
-  PM): "Below zero: 285 fires, net average -0.125 R a trade (95% bootstrap
-  [-0.235, -0.016]); the whole interval is under 0. Decided: 130 of 246 hit
-  the target (52.8%, 95% Wilson [46.6%, 59.0%]) against a net break-even of
-  59.1% at 1R after costs (the history's own mean round trip, 0.181 R)."
-  Gross it is +0.056 (-0.055 to +0.165). Against random entries on the same
-  285 sessions the net delta is -0.052 R a trade (-0.165 to +0.061): "not
-  distinguishable from the random-entry control". The 2R rule over the same
-  two years: net average -0.093 (-0.231 to +0.044, n 285), "not
-  distinguishable from zero"; 61 of 192 decided (31.8 %, Wilson 25.6 % to
-  38.7 %) against a 39.4 % net break-even; delta -0.071 (-0.216 to +0.068),
-  not distinguishable from the control.
+- **The two-year reading.** `timemachine.py run --source massive --years 2
+  --control-draws 3 --until 15:55` under the example config (each past
+  trade's commission spread over the shares its 1 % of $100,000 max loss
+  buys; the rule fires and a control enters by 15:30, the config's
+  no_entries_after; 499 sessions, 2024-10-21 to 2026-10-16, five early
+  closes scored to 12:55): "Edge not distinguishable from zero: 281 fires,
+  net average -0.088 R a trade (95% bootstrap [-0.193, +0.023]); the
+  interval includes 0. Decided: 127 of 243 hit the target (52.3%, 95% Wilson
+  [46.0%, 58.5%]) against a net break-even of 57.1% at 1R after costs (the
+  history's own mean round trip, 0.142 R)." Gross it is +0.054 (-0.052 to
+  +0.166). Against random entries on the same 281 sessions: "Not
+  distinguishable from the random-entry control: net delta -0.061 R a trade
+  (95% bootstrap [-0.172, +0.056]) over 281 paired sessions; the interval
+  includes 0." The 2R rule over the same two years: "Edge not
+  distinguishable from zero: 281 fires, net average -0.054 R a trade (95%
+  bootstrap [-0.188, +0.092]); the interval includes 0. Decided: 59 of 190
+  hit the target (31.1%, 95% Wilson [24.9%, 38.0%]) against a net
+  break-even of 38.1% at 2R after costs (the history's own mean round trip,
+  0.142 R)." Its control: net delta -0.074 R a trade (-0.215 to +0.078) over
+  281 paired sessions, the interval includes 0. Chunk 2 read the same two
+  years with a $50 share basis (8 TSLA shares), the 16:00 last bar and no
+  entry window: the 1R rule "Below zero", -0.125 (-0.235 to -0.016, n 285),
+  at a 0.181 R mean round trip. docs/reviews/chunk3a.md has both runs.
 
 That is one stock and one rule, measured on past sessions; it is not a
 forward result and it promises nothing.
@@ -285,10 +295,10 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    hit the target, 15 the stop, 5 neither. Its verdict: "Cannot judge: 33
    fires, net average -0.261 R a trade (95% bootstrap [-0.592, +0.074]); n is
    below the 40-fire floor." The 2R plan's 60 days cannot judge either (net
-   -0.352, n 33). On two years of Massive bars the 1R rule's net interval is
-   under zero ("Below zero", -0.125, -0.235 to -0.016, n 285) and the 2R
-   rule's holds zero; neither is distinguishable from random entries (above,
-   "The TSLA example, net of costs"). Its 10,000 replays of the rest of the
+   -0.352, n 33). On two years of Massive bars under the example config both
+   rules' net intervals hold zero (1R -0.088, -0.193 to +0.023; 2R -0.054,
+   -0.188 to +0.092; n 281) and neither is distinguishable from random
+   entries (above, "The TSLA example, net of costs"). Its 10,000 replays of the rest of the
    day (seed 19) are a shape diagnostic only: target first 29.4 %, stop
    first 25.5 %, still open at the close 45.1 %. That is the point of
    looking before you risk a dollar.
