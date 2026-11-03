@@ -1,6 +1,7 @@
 # PREREG_RVOL_ORB: the RVOL-ranked five-minute opening-range breakout, long only, on the Massive flat files
 
-Status: DRAFT (awaiting the owner's freeze)
+Status: FROZEN (commit pending)
+Frozen by the owner's word on 2026-11-03
 Date: 2026-11-03
 Author: drafted by Fable for the owner
 Lives at: docs/PREREG_RVOL_ORB.md in /home/axis/Mjonir-DayTrader (plan step 3.3; the runner is step 3.5)
