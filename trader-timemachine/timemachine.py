@@ -108,6 +108,35 @@ class TMError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise TMError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(TMError)
+
+
 # ---------------------------------------------------------------- time (copied from trader-alerts)
 
 def _nth_sunday(year, month, n):
@@ -739,7 +768,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
         "created_by": "trader-timemachine",
         "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": source,
-        "data": {"symbol": msym or sym, "interval": "5m", "range": "60d",
+        "data": {"symbol": msym or sym, "interval": "5m", "range": meta.get("range") or "60d",
                  "last_bar": "%s %s ET" % (last_bar["date"], last_bar["start"]),
                  "dropped": dropped, "short_sessions_left_out": short},
         "plan": plan_out,
@@ -872,6 +901,8 @@ def compute(a):
     plan = load_plan(a, now)
     if a.offline:
         text, source = read_offline(a.offline, plan["symbol"]), "offline"
+    elif a.source == "massive":
+        text, source = _mjonir().history_text(plan["symbol"], plan["date"], a.sessions, a.years), "massive"
     else:
         text, source = fetch_chart(plan["symbol"]), "yahoo"
     return time_machine(text, plan, now, a.replays, a.seed, a.window, a.until, source)
@@ -930,6 +961,9 @@ def main(argv=None):
         p.add_argument("--window", type=int, default=2, help="draw from the same time of day +- this many bars")
         p.add_argument("--until", help="end each replay at this time (default 16:00, the close)")
         p.add_argument("--offline", metavar="FILE", help="a saved Yahoo chart JSON (.json or .json.gz), no network")
+        p.add_argument("--source", choices=["yahoo", "massive"], default=os.environ.get("TRADER_SOURCE") or "yahoo")
+        p.add_argument("--sessions", type=int, default=60, help="massive: sessions up to the plan's day (60 = Yahoo's 60d)")
+        p.add_argument("--years", type=float, help="massive: every session of the N years before the plan's day")
         p.add_argument("--now", help='pretend it is this time ("2026-10-19 10:15" New York, or ISO with Z)')
 
     p = sub.add_parser("run", help="replay the plan: 10,000 simulated sessions plus the history")

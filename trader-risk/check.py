@@ -128,6 +128,23 @@ class RiskError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+
 # ---------------------------------------------------------------- time (New York, no tz files)
 
 def _nth_sunday(year, month, n):

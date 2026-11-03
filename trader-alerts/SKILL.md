@@ -143,6 +143,16 @@ watched; with `add --opening-bell`, the bell rings at 9:30.
 - Never present a quote as live. Free quotes are delayed and unofficial.
 - Confirm every new rule back to the user: ticker, type, level, day.
 
+## Data from Massive
+
+Pass `--source massive`, or export `TRADER_SOURCE=massive`, to read every ticker's
+quote from ONE Massive snapshot request instead of one Yahoo request per ticker. In
+the session the price is the last regular-hours trade; before the open and after
+the close it is the last regular close, and a pre- or post-market print is never
+used as the price. For `--offline DIR`, `python3 -m mjonir.bridge quotes TSLA` writes
+`massive-TSLA.json`. Without the flag nothing changes. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
+`python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
 ## What it never does
 
 It never places, cancels or changes an order, never claims a quote is

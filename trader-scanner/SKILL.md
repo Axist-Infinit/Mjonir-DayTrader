@@ -186,6 +186,20 @@ oversold bounce).
 - Never print a P&L, a return or a profit figure.
 - A hit is stale once the price has moved on. Re-run before acting on it.
 
+## Data from Massive
+
+Pass `--source massive`, or export `TRADER_SOURCE=massive`, to read the Massive
+market-data API through the fork's `mjonir/` layer instead of Yahoo. `daily` reads
+one grouped-daily bundle (real highs and lows, one request a session, cached);
+`orb` reads one 5-minute chart per symbol with real highs and lows, so there is no
+stage 2, and any past session replays, not only the last week; `universe` builds
+the list from Massive's reference data over the floors in `trader/config.json`
+(`universe.min_price`, `universe.min_adv_usd`). The output keeps its shape and says
+`"source": "massive"`. For `--offline`, `python3 -m mjonir.bridge daily` and
+`python3 -m mjonir.bridge intraday ... --bundle` write the files. Without the flag
+nothing changes. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
+`python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
 ## What it never does
 
 It never places, sizes or checks an order, never says which stock to buy,

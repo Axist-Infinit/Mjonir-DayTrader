@@ -19,7 +19,12 @@ gate. Plan and chunk status: README.md. Daily routine: docs/RUNBOOK.md. Reviews:
 - Python 3.8 syntax inside `trader-*/` (no `zoneinfo`, no `list[`/`dict[`/`tuple[`, no `match`). `mjonir/` may use 3.12.
 - Stdlib only in `trader-*/` and `mjonir/`.
 - Always run from the repo root: every script resolves `trader/` relative to the cwd. Never run from `~/Odyssey`.
-- Never print or log the API key; redact by name and by value.
+- Never print or log the API key; redact by name and by value. The key lives in `~/Infinit/.env`; never create
+  `<repo>/.env` with a key (a local plugin install copies gitignored files into the plugin cache).
+  `python3 -m mjonir.bridge status` names the variable that holds it and warns on a key in `<repo>/.env`.
+- Data: `--source massive` (or `export TRADER_SOURCE=massive`) on scan, entry, exit, timemachine, alerts,
+  news; the default stays Yahoo. `python3 -m mjonir.bridge <verb>` writes the same Yahoo-shaped files for
+  `--offline` replays. The test suite ignores a local `trader/calendar.json` and `TRADER_SOURCE`.
 - The box clock is Mountain; print ET via `TZ=America/New_York date` or the scripts' own output.
 - Never write under `~/Odyssey`, `~/Kalex` or `~/Infinit`; their stores are read-only inputs (`?mode=ro`).
 - `git add <explicit paths>`, never `-A` or `.`; never force-push; never amend a pushed commit.

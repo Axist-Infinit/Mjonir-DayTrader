@@ -92,6 +92,18 @@ class NewsError(Exception):
     pass
 
 
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise NewsError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(NewsError)
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -324,6 +336,40 @@ def collect_moves(fetcher, watch, errors=None):
     return out
 
 
+def massive_texts(fetcher, watch, name, what, errors, *args):
+    """--source massive: {ticker: text}, from DIR/<name> offline, else one Massive call for every ticker."""
+    try:
+        if fetcher.offline:
+            return {t: fetcher.get(None, name % t) for t in sorted(watch)
+                    if os.path.isfile(os.path.join(fetcher.offline, name % t))}
+        return getattr(_mjonir(), what)(sorted(watch), *args)
+    except NewsError as exc:
+        errors.append("Massive: %s" % exc)
+        return {}
+
+
+def massive_moves(fetcher, watch, errors):
+    """The moves from one Massive snapshot request (offline: massive-<TICKER>.json)."""
+    out = []
+    for t, data in sorted(massive_texts(fetcher, watch, "massive-%s.json", "quote_texts", errors).items()):
+        try:
+            out.append(parse_chart(data, t))
+        except NewsError as exc:
+            errors.append("price for %s: %s" % (t, exc))
+    return out
+
+
+def massive_items(fetcher, watch, since, errors):
+    """Massive's /v2/reference/news, a third source beside Yahoo RSS and EDGAR (offline: massive-news-<T>.json)."""
+    out = []
+    for t, data in massive_texts(fetcher, watch, "massive-news-%s.json", "news_texts", errors, since).items():
+        try:
+            out += [dict(it, time=parse_time(it["time"])) for it in _mjonir().news_items(t, data)]
+        except NewsError as exc:
+            errors.append("Massive news for %s: %s" % (t, exc))
+    return out
+
+
 def mention_patterns(watch):
     pats = {}
     for t, name in watch.items():
@@ -494,6 +540,7 @@ def main(argv=None):
     ap.add_argument("--user-agent", help="SEC User-Agent: \"Your Name you@example.com\"")
     ap.add_argument("--config", default="trader/config.json")
     ap.add_argument("--offline", metavar="DIR")
+    ap.add_argument("--source", choices=["yahoo", "massive"], default=os.environ.get("TRADER_SOURCE") or "yahoo")
     ap.add_argument("--now", help="ISO time, for reproducible runs")
     ap.add_argument("--dry-run", action="store_true", help="do not update the state file")
     ap.add_argument("--json", action="store_true")
@@ -521,9 +568,12 @@ def main(argv=None):
     fetcher = Fetcher(ua, offline=args.offline)
     forms = [f.strip().upper() for f in args.forms.split(",") if f.strip()]
     items = collect(fetcher, watch, state, sec=sec, forms=forms, errors=errors)
+    if args.source == "massive":
+        items += massive_items(fetcher, watch, now - _dt.timedelta(hours=args.hours), errors)
     items = dedupe(tag(items, watch))
     shown = select(items, state, now, hours=args.hours, show_all=args.all)
-    moves = [] if args.no_moves else collect_moves(fetcher, watch, errors)
+    moves = [] if args.no_moves else (massive_moves(fetcher, watch, errors) if args.source == "massive"
+                                      else collect_moves(fetcher, watch, errors))
     if args.json:
         mv = [dict(m, time=m["time"].isoformat() if m.get("time") else None,
                    moving=abs(m["pct"]) >= args.move_pct) for m in moves]

@@ -108,6 +108,37 @@ class EntryError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+SOURCE = "yahoo"  # --source or TRADER_SOURCE (massive), set by main()
+
+
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise EntryError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(EntryError)
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -360,6 +391,9 @@ def get_chart(sym, interval, day=None, offline=None, today=None):
             text = read_text(f)
         except (OSError, ValueError) as e:
             raise EntryError("could not read %s: %s" % (f, e))
+    elif SOURCE == "massive":  # one session from Massive, any date: no 60-day cap
+        today = today or to_eastern(utc_now()).date()
+        text = _mjonir().chart_text(sym, interval, day or today, live=(day or today) >= today)
     else:
         today = today or to_eastern(utc_now()).date()
         text = yahoo_get(chart_path(sym, chart_range(day or today, today, interval), interval))
@@ -566,7 +600,7 @@ def entry_doc(res, now_utc):
             "bar_index": t.get("bar_index"), "price": t.get("price"), "level": res.get("level"),
             "interval": res["interval"],
             "opening_range": {"high": orr["high"], "low": orr["low"], "minutes": orr["minutes"]} if orr else None,
-            "source": "yahoo", "checked_at": iso(now_utc), "reason": res.get("reason")}
+            "source": SOURCE, "checked_at": iso(now_utc), "reason": res.get("reason")}
 
 
 def write_json(path, doc):
@@ -595,8 +629,9 @@ def describe(res):
     """Plain lines for a person."""
     when = datetime.datetime.strptime(res["now"], "%Y-%m-%d %H:%M:%S")
     bars = "5-minute" if res["interval"] == "5m" else "1-minute"
-    head = "%s  %s %s ET  %s on %s bars (Yahoo, free, can lag)" % (
-        res["symbol"], when.strftime("%a %Y-%m-%d"), when.strftime("%H:%M"), setup_name(res), bars)
+    head = "%s  %s %s ET  %s on %s bars (%s)" % (
+        res["symbol"], when.strftime("%a %Y-%m-%d"), when.strftime("%H:%M"), setup_name(res), bars,
+        "Massive" if SOURCE == "massive" else "Yahoo, free, can lag")
     if res.get("data_time") and res["data_time"] <= res["now"] and res["data_time"][:10] == res["date"]:
         head += ", data to %s" % res["data_time"][11:]
     out = [head]
@@ -924,6 +959,7 @@ def main(argv=None):
         p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
         p.add_argument("--now", help='pretend it is this New York time, e.g. "2026-10-19 10:15"')
         p.add_argument("--offline", metavar="PATH", help="saved Yahoo chart JSON (.json/.json.gz) or a folder")
+        p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo; or export TRADER_SOURCE=massive")
         p.add_argument("--config", default="trader/config.json")
 
     p = sub.add_parser("check", help="the setup's status right now")
@@ -943,6 +979,8 @@ def main(argv=None):
     p.add_argument("--watchlist", default="trader/watchlist.json")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    global SOURCE
+    SOURCE = "massive" if (getattr(a, "source", None) or os.environ.get("TRADER_SOURCE")) == "massive" else "yahoo"
     if not a.cmd:
         ap.print_help()
         return 1

@@ -89,6 +89,16 @@ in and out before the close. No new 8-K." At 10:52 the price line reads
 `TSLA 366.48 +3.31% vs yesterday's close 354.72 at 10:52 ET  MOVING`. When a
 ticker has no news, say so rather than padding the brief.
 
+## Data from Massive
+
+Pass `--source massive`, or export `TRADER_SOURCE=massive`, to read each ticker's
+move from one Massive snapshot request and to add Massive's own news
+(`/v2/reference/news`) as a third headline source beside Yahoo RSS and EDGAR, in the
+same list (one item per story URL) and the same seen-state file. For `--offline
+DIR`, `python3 -m mjonir.bridge quotes` and `python3 -m mjonir.bridge news` write
+`massive-<TICKER>.json` and `massive-news-<TICKER>.json`. Without the flag nothing
+changes.
+
 ## What it never does
 
 - Never invents or embellishes a story, a quote or a number.

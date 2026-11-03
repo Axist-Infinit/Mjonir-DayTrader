@@ -47,7 +47,7 @@ in `trader/` under the current directory.
 | chunk | change | status |
 | --- | --- | --- |
 | 0 | Bootstrap: NOTICE, CLAUDE.md, the plugin renamed `mjonir-daytrader` in marketplace `mjonir`, stub folders for the two new skills, a runbook stub | done |
-| 1 | Data layer on Massive: a stdlib `mjonir/` package (client, market calendar, bar cache, read-only local stores, Yahoo-shaped output), `--source massive` on each script, a bridge CLI, years of history instead of 60 days | planned |
+| 1 | Data layer on Massive: a stdlib `mjonir/` package (client, market calendar, bar cache, read-only local stores, Yahoo-shaped output), `--source massive` on each script, a bridge CLI, years of history instead of 60 days | done on `feat/c1-data` (not merged yet) |
 | 2 | Costs and intervals: slippage, spread and commission in every R; Wilson and bootstrap intervals; verdicts that say "cannot judge" below 40 fires | planned |
 | 2 | Random-entry control: every replay compared with random entries on the same sessions | planned |
 | 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | planned |
@@ -287,9 +287,10 @@ tests/              unittest suite + offline fixtures
 
 ## Fine print
 
-**This fork.** Under `--source massive` (chunk 1) the scripts read the
-Massive API with the owner's own key from the environment; the key is never
-printed or written to a file. The owner places every order by hand at
+**This fork.** Under `--source massive` (or `TRADER_SOURCE=massive`) the
+scripts read the Massive API with the owner's own key from `~/Infinit/.env`;
+the key is never printed or written to a file, and never belongs in
+`<repo>/.env`. `python3 -m mjonir.bridge status` checks it. The owner places every order by hand at
 E*TRADE: upstream's broker connector setup (Alpaca, Interactive Brokers) is
 not used here, and chunk 4 rewrites `/trader-broker` to print a human ticket.
 The forward record's gate, not any replay, decides whether money is ever used.

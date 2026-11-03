@@ -346,7 +346,9 @@ def quote_doc(symbol, snap, cal, now, prev_close=None, source="massive"):
 def news_items(ticker, rows):
     """Massive /v2/reference/news rows -> trader-news items (time as an ISO string, UTC)."""
     out = []
-    for r in rows or []:
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
         link = r.get("article_url") or ""
         out.append({"id": "massive:" + str(r.get("id") or link), "source": "Massive news", "kind": "headline",
                     "ticker": ticker.upper(), "title": " ".join(str(r.get("title") or "").split()),
@@ -710,7 +712,8 @@ class Adapter(object):
         return self._run(g["fetch_news"], None, symbols, since_utc, limit)
 
     def news_items(self, ticker, text):
-        return news_items(ticker, json.loads(text) if isinstance(text, (str, bytes)) else text)
+        """news.py: Massive news rows (JSON text or a list) as trader-news items."""
+        return self._run(lambda: news_items(ticker, json.loads(text) if isinstance(text, (str, bytes)) else text))
 
     def universe_rows(self, a=None):
         """scan.py universe: (kept [(SYM, name)], counts, as_of) from the Massive universe rule."""

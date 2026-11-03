@@ -34,6 +34,9 @@ if ROOT not in sys.path:
 # Nothing a test does may write trader/data under the repo: the cache goes to a throwaway folder.
 DATA_DIR = tempfile.mkdtemp(prefix="mjonir-tests-")
 os.environ["MJONIR_DATA_DIR"] = DATA_DIR
+# ...and no test ever opens the real Kalex store or the flat files (a test that wants one builds it)
+os.environ["MJONIR_KALEX_5M"] = os.path.join(DATA_DIR, "no-kalex-store.sqlite3")
+os.environ["MJONIR_FLATFILE_DIR"] = os.path.join(DATA_DIR, "no-flatfiles")
 atexit.register(shutil.rmtree, DATA_DIR, True)
 
 from mjonir import massive as M  # noqa: E402

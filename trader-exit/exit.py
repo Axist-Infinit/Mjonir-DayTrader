@@ -97,6 +97,37 @@ class PlanError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+SOURCE = "yahoo"  # --source or TRADER_SOURCE (massive), set by main()
+
+
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise PlanError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(PlanError)
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -404,6 +435,8 @@ def load_chart(sym, interval, day, offline=None):
             text = read_text(path)
         except (OSError, ValueError) as e:
             raise PlanError("could not read %s: %s" % (path, e))
+    elif SOURCE == "massive":  # one session from Massive, any date
+        text = _mjonir().chart_text(ysym, interval, day, live=day >= to_eastern(utc_now()).date())
     else:
         back = (to_eastern(utc_now()).date() - day).days
         rng = "1d" if back <= 0 else "5d" if back <= 6 else "1mo" if back <= 28 else "60d"
@@ -712,6 +745,7 @@ def main(argv=None):
     p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--offline", metavar="PATH", help="saved Yahoo chart JSON for an atr stop")
+    p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo; or export TRADER_SOURCE=massive")
     p.add_argument("--now", help='pretend it is this New York time, e.g. "2026-10-19 10:15"')
     p.add_argument("--write", nargs="?", const="trader/plan.json", metavar="PATH",
                    help="save the plan (default trader/plan.json)")
@@ -721,6 +755,8 @@ def main(argv=None):
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    global SOURCE
+    SOURCE = "massive" if (getattr(a, "source", None) or os.environ.get("TRADER_SOURCE")) == "massive" else "yahoo"
     if not a.cmd:
         ap.print_help()
         return 1

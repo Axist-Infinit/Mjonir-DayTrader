@@ -149,6 +149,18 @@ the user should hear before `/trader-budget` sizes 8 shares.
 - Always say the seed, so any run can be repeated.
 - One plan per run. A changed entry, stop, target or date is a new run.
 
+## Data from Massive
+
+Pass `--source massive`, or export `TRADER_SOURCE=massive`, to build the history from
+the Massive market-data API (or the read-only local stores when they hold the whole
+range) instead of Yahoo's 60 days. `--sessions N` takes the N sessions up to the
+plan's day (the default matches Yahoo's window); `--years N` takes every session of
+the N years before it. `data.range` then says how many sessions the file really
+holds, and `"source"` says `massive`. For `--offline`, `python3 -m mjonir.bridge
+history SYM --from <date> --to <date>` writes `<SYM>-60d5m.json.gz`. Without the
+flag nothing changes. The early-close list extends itself from
+`trader/calendar.json` (`python3 -m mjonir.bridge calendar`).
+
 ## What it never does
 
 It never places an order, never sizes a position, never changes the plan,

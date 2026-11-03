@@ -100,6 +100,35 @@ class AlertError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise AlertError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(AlertError)
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -313,16 +342,28 @@ def _offline_text(folder, source, sym):
 def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
     """{SYM: quote} and [errors]. One request per ticker, with a pause between."""
     quotes, errors = {}, []
+    texts = {}
+    if source == "massive" and not offline:
+        try:
+            texts = _mjonir().quote_texts([s.upper() for s in symbols])  # one snapshot request for all
+        except AlertError as e:
+            errors.append(str(e))
     for i, sym in enumerate(symbols):
         sym = sym.upper()
         try:
             if offline:
                 text = _offline_text(offline, source, sym)
+            elif source == "massive":
+                if sym not in texts:
+                    raise AlertError("no Massive quote for %s" % sym)
+                text = texts[sym]
             else:
                 if i and pause:
                     _sleep(pause)
                 text = fetch(stooq_url(sym)) if source == "stooq" else fetch_yahoo(sym)
             quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+            if source == "massive":
+                quotes[sym]["source"] = "massive"
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
@@ -720,7 +761,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def net(p):
-        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq"])
+        p.add_argument("--source", default=os.environ.get("TRADER_SOURCE") or "yahoo",
+                       choices=["yahoo", "stooq", "massive"])
         p.add_argument("--offline", metavar="DIR", help="read <source>-<TICKER>.json|csv files, no network")
         p.add_argument("--now", help="pretend it is this time (no offset = New York time)")
         p.add_argument("--json", action="store_true")

@@ -139,6 +139,37 @@ class ScanError(Exception):
     pass
 
 
+def _calendar_overlay(g):
+    """Extend the lists above from trader/calendar.json or TRADER_CALENDAR (`python3 -m mjonir.bridge calendar`)."""
+    try:
+        with open(os.environ.get("TRADER_CALENDAR") or "trader/calendar.json", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        years = set(int(y) for y in doc.get("covered_years") or ())
+        g.get("NYSE_HOLIDAYS", {}).update(doc.get("holidays") or {})
+        g.get("NYSE_EARLY_CLOSE", {}).update(doc.get("early_closes") or {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return  # no calendar file (or not one): the seed lists above stand
+    if "CALENDAR_YEARS" in g:
+        g["CALENDAR_YEARS"] = tuple(sorted(set(g["CALENDAR_YEARS"]) | years))
+
+
+_calendar_overlay(globals())
+
+SOURCE = "yahoo"  # --source or TRADER_SOURCE (massive), set by main()
+
+
+def _mjonir():
+    """--source massive: the Mjonir data layer (mjonir/ beside the skill folders, or MJONIR_ROOT)."""
+    root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mjonir import yahoo_shape
+    except ImportError as e:
+        raise ScanError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
+    return yahoo_shape.adapter(ScanError)
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -746,6 +777,8 @@ def progress(a, msg):
 
 def fetch_spark(symbols, rng, interval, pause, a=None):
     """Batches of 20. -> ({SYM: series}, {SYM: error})."""
+    if SOURCE == "massive":
+        return _mjonir().spark_series(symbols, rng, interval, parse_spark, a)
     data, failed = {}, {}
     batches = [symbols[i:i + SPARK_MAX] for i in range(0, len(symbols), SPARK_MAX)]
     for k, batch in enumerate(batches):
@@ -840,7 +873,7 @@ def money(x):
 def cmd_universe(a):
     t0 = time.time()
     texts = {}
-    for k, fname in enumerate(NASDAQ_FILES):
+    for k, fname in enumerate(() if SOURCE == "massive" else NASDAQ_FILES):
         if a.offline:
             p = os.path.join(a.offline, fname)
             if not os.path.exists(p):
@@ -856,7 +889,7 @@ def cmd_universe(a):
                 raise ScanError("nasdaqtrader.com answered HTTP %d for %s" % (e.code, fname))
             except (urllib.error.URLError, OSError) as e:
                 raise ScanError("could not reach nasdaqtrader.com: %s" % getattr(e, "reason", e))
-    kept, counts, created = build_universe(texts)
+    kept, counts, created = _mjonir().universe_rows(a) if SOURCE == "massive" else build_universe(texts)
     if not a.no_write:
         d = os.path.dirname(a.out)
         if d:
@@ -897,7 +930,7 @@ def cmd_daily(a):
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "source": "yahoo", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
+           "source": SOURCE, "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
            "note": NOTE, "hits": hits}
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
@@ -962,7 +995,7 @@ def cmd_orb(a):
     confirm = None
     if not a.offline:
         today = to_eastern(parse_now(None)).date()
-        if (today - day).days > 6:
+        if SOURCE != "massive" and (today - day).days > 6:
             raise ScanError("Yahoo's free 5-minute history is short: replay %s with --offline" % day.isoformat())
         rng = "1d" if day == today else "5d"
         progress(a, "Stage 1: 5-minute closes for %s symbols (%d spark requests)..."
@@ -977,6 +1010,8 @@ def cmd_orb(a):
             if len(done) % 50 == 0:
                 progress(a, "  stage 2: %d v8 charts so far" % len(done))
             return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
+        if SOURCE == "massive":
+            confirm = None  # stage 1 already holds every chart's real highs and lows
     hits, counts, failed2 = scan_orb(data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
                                      a.max_confirm)
     failed = dict(failed or {})
@@ -985,7 +1020,7 @@ def cmd_orb(a):
     as_of = "%s %s ET" % (day.isoformat(), cutoff.strftime("%H:%M"))
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
+           "unconfirmed": counts["unconfirmed"], "source": SOURCE, "or_minutes": a.or_minutes,
            "interval": "%dm" % BAR_MIN,
            "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
     if a.offline:
@@ -1037,6 +1072,7 @@ def main(argv=None):
     p.add_argument("--no-write", action="store_true")
     p.add_argument("--pause", type=float, default=PAUSE)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo; or export TRADER_SOURCE=massive")
 
     def common(p, min_price, min_volume):
         g = p.add_mutually_exclusive_group()
@@ -1047,6 +1083,7 @@ def main(argv=None):
         p.add_argument("--min-price", type=float, default=min_price)
         p.add_argument("--min-volume", type=int, default=min_volume)
         p.add_argument("--offline", metavar="PATH", help="fixture folder or file instead of the network")
+        p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo; or export TRADER_SOURCE=massive")
         p.add_argument("--now", help='pretend it is this time ("2026-10-19 10:15" New York, or ...Z)')
         p.add_argument("--out", default="trader/watchlist.json")
         p.add_argument("--no-write", action="store_true")
@@ -1066,6 +1103,8 @@ def main(argv=None):
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 15:30)")
     p.add_argument("--config", default="trader/config.json")
     a = ap.parse_args(argv)
+    global SOURCE
+    SOURCE = "massive" if (getattr(a, "source", None) or os.environ.get("TRADER_SOURCE")) == "massive" else "yahoo"
     if not a.cmd:
         ap.print_help()
         return 1

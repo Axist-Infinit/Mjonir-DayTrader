@@ -154,6 +154,14 @@ it is after the 3:30 entry cutoff: it is an exit.
 - Free Yahoo prices are unofficial and can lag; the broker's price is the one that fills, and a
   stop can fill worse than its price in a fast market.
 
+## Data from Massive
+
+The risk check reads no market data itself. The scripts that fetch take
+`--source massive`, or export `TRADER_SOURCE=massive`; `alerts.py quote --source
+massive --write` fills `trader/prices.json` from Massive for this check. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
+`python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+A date past the built-in lists then stops warning once that file covers its year.
+
 ## What it never does
 
 It never places an order, never edits an order to make it pass, never

@@ -125,6 +125,18 @@ and the trigger moves to 10:35 AM at 365.75 (the 10:30 bar, 7.98x).
   reset it.
 - Never call an entry early because a bar looks like it will close above.
 
+## Data from Massive
+
+Pass `--source massive`, or export `TRADER_SOURCE=massive`, to read the session's
+bars from the Massive market-data API through the fork's `mjonir/` layer. Any past
+session replays the same way as today (no 60-day limit), and the bar-close rule
+reads the last trade's time from Massive's snapshot. `trader/entry.json` then says
+`"source": "massive"`, and `watch --source massive --now "<a past session> 09:50"`
+replays that session without waiting. `python3 -m mjonir.bridge intraday TSLA --day
+<date>` writes `<TICKER>.json` for `--offline`. Without the flag nothing changes.
+The NYSE holiday lists extend themselves from `trader/calendar.json`, which
+`python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
 ## What it never does
 
 It never places an order, never sizes a position, never sets the stop (that

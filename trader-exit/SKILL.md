@@ -115,6 +115,14 @@ sizes it: a $50 max loss per trade buys floor(50 / 5.86) = 8 shares.
   prediction that the price gets there.
 - Long side only. v2 plans longs only.
 
+## Data from Massive
+
+For an `atr:K` stop, pass `--source massive`, or export `TRADER_SOURCE=massive`,
+to read the entry session's bars from the Massive market-data API instead of Yahoo,
+for any past session. The plan's own rules do not change. Without the flag nothing
+changes. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
+`python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
 ## What it never does
 
 It never places an order, never sizes a position, never widens a stop to
