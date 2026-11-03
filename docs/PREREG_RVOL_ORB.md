@@ -1,6 +1,6 @@
 # PREREG_RVOL_ORB: the RVOL-ranked five-minute opening-range breakout, long only, on the Massive flat files
 
-Status: FROZEN (commit pending)
+Status: FROZEN (commit 56319239840bc3a54ae40649cb03314d880c1cb2)
 Frozen by the owner's word on 2026-11-03
 Date: 2026-11-03
 Author: drafted by Fable for the owner
