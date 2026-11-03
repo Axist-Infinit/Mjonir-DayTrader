@@ -1084,6 +1084,8 @@ def run_plan(a, cfg):
     if a.portfolio and os.path.exists(a.portfolio):
         pf = read_json(a.portfolio, "portfolio")
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
+    if a.budget is not None and isinstance(cfg.get("sizing"), dict):
+        notes.append("--budget is not used: this config sizes by sizing.trade_notional_usd (percent mode).")
     s = size_trade(plan, cfg, a.budget, limit, price, cash, today, no_costs=a.no_costs)
     order = bracket_order(s)
     if order and a.write:

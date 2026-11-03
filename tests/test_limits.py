@@ -146,6 +146,10 @@ class Sizing(unittest.TestCase):
             code, out, err = run(size, ["--plan", p, "--config", EXAMPLE, "--portfolio", os.path.join(d, "none"),
                                         "--now", NOW])
             self.assertEqual(code, 0, err)
+            code, out2, _ = run(size, ["--plan", p, "--config", EXAMPLE, "--portfolio", os.path.join(d, "none"),
+                                       "--now", NOW, "--budget", "5000"])
+            self.assertIn("--budget is not used: this config sizes by sizing.trade_notional_usd", out2)
+            self.assertIn("Size: 156 shares", out2)
             for line in ("Size: 156 shares of TSLA = $56,812.08 at 364.18, 56.81% of the $100,000 trade notional.",
                          "Risk $914.16 at the stop before costs (0.914% of the notional); max loss net of costs "
                          "$995.70 (0.996% of the notional; the cap is $1,000, 1.000%).",
@@ -266,6 +270,11 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.states(self.run_check(order=thin))["adv_floor"], "block")
         none = dict(self.order, plan=dict(self.order["plan"], costs=None))
         self.assertEqual(self.states(self.run_check(order=none))["adv_floor"], "unverified")
+        self.assertIn("the plan carries no cost card; --source massive asks Massive",
+                      self.reason(self.run_check(order=none), "adv_floor"))
+        noadv = dict(self.order, plan=dict(self.order["plan"], costs=dict(self.order["plan"]["costs"], adv_usd=None)))
+        self.assertIn("(the plan's cost card has none; --source massive asks Massive)",
+                      self.reason(self.run_check(order=noadv), "adv_floor"))
         self.assertEqual(self.states(self.run_check(order=none, adv_fn=lambda s: 3e8))["adv_floor"], "pass")
 
         def broken(sym):

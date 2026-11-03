@@ -232,6 +232,9 @@ def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, hav
         floor = float(fl["min_adv_usd"])
         card = plan.get("costs") if isinstance(plan.get("costs"), dict) else {}
         adv, basis = _f(card.get("adv_usd")), "the plan's cost card"
+        if adv is None:
+            basis = ("the plan's cost card has none" if card else "the plan carries no cost card") + (
+                "" if adv_fn is not None else "; --source massive asks Massive")
         if adv is None and adv_fn is not None:
             try:
                 adv, basis = _f(adv_fn(sym)), "Massive, the 20 sessions before today"
@@ -239,8 +242,7 @@ def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, hav
                 basis = "Massive could not answer: %s" % e
         if adv is None:
             out.append(_ck("adv_floor", "unverified", "no ADV$ for %s (%s): the %s floor cannot be checked"
-                           % (sym, basis if card or adv_fn else "the plan carries no cost card; --source massive asks "
-                                                               "Massive", money(floor))))
+                           % (sym, basis, money(floor))))
         elif adv < floor - 0.5:
             out.append(_ck("adv_floor", "block", "%s ADV$ %s (%s) is under the %s floor (floors.min_adv_usd)"
                            % (sym, money(adv), basis, money(floor))))
