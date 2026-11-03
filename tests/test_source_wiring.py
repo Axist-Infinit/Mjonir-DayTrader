@@ -191,6 +191,18 @@ class TimeMachine(Wired):
                  "massive", "--years", "1"])
         self.assertEqual(self.calls[-1][1][3].isoformat(), "2025-10-19")
 
+    def test_the_source_is_the_documents_own(self):
+        tm = load("trader-timemachine", "timemachine")
+
+        def from_kalex(*a, **kw):
+            d = doc_of(TM60)
+            d["chart"]["result"][0]["meta"]["mjonir"] = {"source": "kalex", "adjusted": True}
+            return d
+        self.serve("fetch_history_doc", from_kalex)
+        code, out, err = run(tm, ["run", "--plan", PLAN, "--now", "2026-10-19 10:15", "--replays", "10", "--json",
+                                  "--source", "massive"])
+        self.assertEqual((code, json.loads(out)["source"]), (0, "kalex"), err)
+
 
 class Alerts(Wired):
     def test_quote_and_prices(self):

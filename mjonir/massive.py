@@ -10,6 +10,8 @@ The guards are not optional:
 * The key travels in the ``Authorization: Bearer`` header, never in a URL. Every error message still
   goes through ``config.redact`` (by name and by value): an exception that quotes a URL or a header
   must never carry the credential.
+* Redirects are never followed: the ``Authorization`` header would go with them to the new host. Any
+  3xx is refused (``_NoRedirect``).
 * Paced by a token bucket (default 1,200 requests a minute, shared by every client in the process);
   a 429 backs off and retries.
 * Options (``/v3/snapshot/options``, ``/v3/reference/options``, ``O:`` tickers), indices (``I:``)
@@ -66,7 +68,7 @@ class MassiveError(RuntimeError):
     @property
     def outcome(self):
         """'refused' (the API answered no) or 'unverified' (nothing was learned)."""
-        if self.status is not None and 400 <= self.status < 500 and self.status != 429:
+        if self.status is not None and 300 <= self.status < 500 and self.status != 429:
             return "refused"
         return "unverified"
 
@@ -128,9 +130,20 @@ def shared_pace():
         return _SHARED_PACE
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the Authorization header to the new location."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+#: The one opener every default client uses: urllib's handlers with the redirect handler replaced.
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _urlopen(url, headers, timeout):
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _OPENER.open(req, timeout=timeout) as r:
         return r.read()
 
 
@@ -318,6 +331,7 @@ class Client(object):
         else:
             self.pace = shared_pace()
         self.requests = 0
+        self._count_lock = threading.Lock()   # the bulk fetcher's threads share one client
 
     def __repr__(self):
         return "<mjonir.massive.Client %s>" % self.base_url
@@ -345,7 +359,8 @@ class Client(object):
         endpoint = self._safe(url.split("?")[0])
         for attempt in range(self.max_retries):
             self.pace.take()
-            self.requests += 1
+            with self._count_lock:
+                self.requests += 1
             retry_after = None
             try:
                 body = self._open(url, self._headers(), self.timeout)
@@ -359,6 +374,8 @@ class Client(object):
                     e.close()
                 except Exception:
                     pass
+                if 300 <= code < 400:
+                    raise MassiveError("redirect refused from %s (HTTP %d)" % (endpoint, code), status=code)
                 if code not in RETRY_STATUS or attempt == self.max_retries - 1:
                     raise MassiveError("HTTP %d from %s" % (code, endpoint), status=code)
             except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
@@ -414,7 +431,9 @@ class Client(object):
                 raise Refused("aggregates %s %s-%s %s..%s: status %r" % (symbol, mult, timespan, start, end, st))
             rows = p.get("results") or []
             said = p.get("resultsCount")
-            if said is not None and int(said) != len(rows):
+            if said is None:
+                raise Refused("aggregates %s: no resultsCount to verify the rows against" % symbol)
+            if int(said) != len(rows):
                 raise Refused("aggregates %s: resultsCount %s but %d rows delivered" % (symbol, said, len(rows)))
             if p.get("adjusted") is not None and bool(p.get("adjusted")) != bool(adjusted):
                 raise Refused("aggregates %s: asked adjusted=%s, answered %s" % (symbol, adjusted, p.get("adjusted")))

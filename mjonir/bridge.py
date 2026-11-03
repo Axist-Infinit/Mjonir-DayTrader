@@ -15,11 +15,15 @@ Files, by verb (``--out`` moves them):
   intraday   <out>/<SYM>.json (entry.py / exit.py --offline DIR), or with --bundle
              <out>/wall5m-<D>.json.gz (scan.py orb --offline FILE); default trader/data/intraday/<D>/
   history    <out>/<SYM>-60d5m.json.gz (timemachine.py --offline DIR; the name is upstream's, meta.range
-             says how many sessions it really holds); default trader/data/history/
+             says how many sessions it really holds); default trader/data/history/. --source kalex is
+             split-checked against the API (refused after a later split, unverified without the key)
   daily      <out>/daily-spark-<D>.json (scan.py daily --offline FILE); default trader/data/daily/
   quotes     <out>/massive-<SYM>.json; news <out>/massive-news-<SYM>.json; default trader/data/quotes|news/
 
-Every verb takes ``--now`` (New York, like the scripts), ``--json`` and ``--out``. Exit codes: 0 ok,
+Every verb takes ``--now`` (New York, like the scripts), ``--json`` and ``--out``. ``--now`` moves
+calendar (generated_at), universe and daily (the last complete session), quotes (which session the
+quote describes), news (the --hours window) and status (the printed time); probe, intraday and history
+ignore it: they use the real clock (a past day is history, today is live). Exit codes: 0 ok,
 1 refused (the API or the data said no: P11, a closed day, 401/403), 2 unverified (could not ask).
 Options, indices (I:) and Benzinga are not entitled on this key: never tried, and ``status`` says so.
 The key is never printed: ``status`` names the variable that holds it, never its value.
@@ -393,8 +397,6 @@ def main(argv=None, client_factory=None):
     try:
         if a.verb == "status":
             return cmd_status(a, factory)
-        if a.verb == "history" and a.source == "kalex":
-            return cmd_history(a, None)
         return VERBS[a.verb](a, factory())
     except Y.ERRORS as e:
         print("bridge %s: %s: %s" % (a.verb, Y.outcome_of(e), e), file=sys.stderr)

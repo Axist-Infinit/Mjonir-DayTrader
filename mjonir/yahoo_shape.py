@@ -359,34 +359,42 @@ def news_items(ticker, rows):
 
 # ---------------------------------------------------------------- fetching (client + calendar + cache)
 
-def session_rows(client, cal, symbol, day, interval="5m", cache=None, clock=None):
+def session_rows(client, cal, symbol, day, interval="5m", cache=None):
     """Raw rows of one session (extended hours included): the cache for a complete session, else the
-    API (and the cache is filled). Today's session is never cached."""
+    API (and the cache is filled). "Complete" is judged by the REAL clock (a date before today in New
+    York): a replay pinned with --now must cut the bars by its own now. Today's session and an empty
+    answer are never cached. The cache key is the Massive ticker (BRK.B and BRK-B share a session)."""
     day = K.as_date(day)
     mult, span, _ = INTERVALS[interval]
-    cacheable = cache is not None and K.as_date(day) < K.today_et()
+    key = massive_symbol(symbol)
+    cacheable = cache is not None and day < K.today_et()
     if cacheable:
-        got = cache.get_session(symbol, interval, day, src="massive")
+        got = cache.get_session(key, interval, day, src="massive")
         if got is not None:
             return got
-    rows = client.aggregates(massive_symbol(symbol), mult, span, day.isoformat(), day.isoformat())
-    if cacheable:
-        cache.put_session(symbol, interval, day, rows, "massive", adjusted=True)
+    rows = client.aggregates(key, mult, span, day.isoformat(), day.isoformat())
+    if cacheable and rows:
+        cache.put_session(key, interval, day, rows, "massive", adjusted=True)
     return rows
 
 
-def range_rows(client, cal, symbol, sessions, interval="5m", cache=None):
+def range_rows(client, cal, symbol, sessions, interval="5m", cache=None, stats=None):
     """Raw rows for many sessions: cached ones from the cache, the rest in ranged API requests
-    (contiguous runs), each complete session then cached."""
+    (contiguous runs), each complete session with rows then cached. A session the answer lacks is
+    NOT cached (the next call asks again). `stats` (a dict) receives cached / fetched session counts,
+    the API requests made and the oldest fetch date of the cached rows used."""
     mult, span, _ = INTERVALS[interval]
+    key = massive_symbol(symbol)
     today = K.today_et()
-    out, missing = [], []
+    out, missing, oldest = [], [], None
     for d in sessions:
-        got = cache.get_session(symbol, interval, d, src="massive") if (cache is not None and d < today) else None
+        got = cache.get_session(key, interval, d, src="massive") if (cache is not None and d < today) else None
         if got is None:
             missing.append(d)
         else:
             out.extend(got)
+            f = (cache.coverage(key, interval, d) or {}).get("fetched_at")
+            oldest = f if oldest is None or (f and f < oldest) else oldest
     runs, cur = [], []
     for d in missing:
         if cur and cal.next_session(cur[-1]) != d:
@@ -396,14 +404,42 @@ def range_rows(client, cal, symbol, sessions, interval="5m", cache=None):
     if cur:
         runs.append(cur)
     for run in runs:
-        rows = client.aggregates(massive_symbol(symbol), mult, span, run[0].isoformat(), run[-1].isoformat())
+        rows = client.aggregates(key, mult, span, run[0].isoformat(), run[-1].isoformat())
         per = by_session(rows)
         for d in run:
             got = per.get(d, [])
-            if cache is not None and d < today:
-                cache.put_session(symbol, interval, d, got, "massive", adjusted=True)
+            if cache is not None and d < today and got:
+                cache.put_session(key, interval, d, got, "massive", adjusted=True)
             out.extend(got)
+    if stats is not None:
+        stats.update(cached=len(sessions) - len(missing), fetched=len(missing), requests=len(runs),
+                     oldest_fetch=oldest)
     return sorted(out, key=lambda r: r["t"])
+
+
+def kalex_rows_checked(client, symbol, sessions):
+    """(rows, coverage) from the Kalex store, after a split check. The store is adjusted as of its
+    coverage end; a split executed after that end (and so on or after the span) leaves its rows on the
+    old share count against every other source: REFUSED, naming the split. When no client can ask,
+    UNVERIFIED, never served silently."""
+    sym = massive_symbol(symbol)
+    cov = LS.kalex_coverage(sym)
+    if not cov:
+        raise DataError("the Kalex store has no %s rows" % symbol)
+    try:
+        splits = _client(client).splits(symbol=sym)
+    except M.MassiveError as e:
+        raise DataError("the Kalex rows of %s are adjusted as of %s and no client could check for a later "
+                        "split: %s" % (symbol, cov["last_day"], e), outcome="unverified")
+    late = [x for x in splits if str(x.get("execution_date"))[:10] > cov["last_day"]
+            and str(x.get("execution_date"))[:10] >= K.as_date(sessions[0]).isoformat()]
+    if late:
+        x = late[0]
+        raise DataError("%s split %s-for-%s on %s, after the Kalex store's coverage end %s: its rows are on the "
+                        "old share count, refused (use --source api)" % (symbol, x.get("split_to"),
+                                                                         x.get("split_from"),
+                                                                         x.get("execution_date"), cov["last_day"]))
+    return LS.kalex_5m(sym, sessions[0], sessions[-1]), cov
 
 
 def daily_rows(client, cal, symbol, start, end, cache=None):
@@ -559,7 +595,8 @@ def fetch_daily_bundle(client, cal, symbols=None, sessions=65, end=None, clock=N
 
 def fetch_history_doc(client, cal, symbol, start, end, source="auto", clock=None, cache=_AUTO, interval="5m"):
     """Many sessions of 5-minute bars in one v8 document, from ONE source:
-    ``api`` (Massive, adjusted now, cached), ``kalex`` (local, adjusted as of its fetch, read-only),
+    ``api`` (Massive, adjusted now, cached), ``kalex`` (local, adjusted as of its coverage end, read-only,
+    refused after a later split, unverified when no client can check: ``kalex_rows_checked``),
     ``flatfile`` (local, UNADJUSTED: refused across a split), or ``auto`` (kalex when the store holds
     the whole range, else api). The last session may be today (live, never cached)."""
     cal = _cal(cal)
@@ -582,7 +619,7 @@ def fetch_history_doc(client, cal, symbol, start, end, source="auto", clock=None
     if source in ("kalex", "flatfile") and live_day:
         raise DataError("today's session is not in the local stores: use --source api")
     if source == "kalex":
-        rows = LS.kalex_5m(massive_symbol(symbol), sessions[0], sessions[-1])
+        rows, _ = kalex_rows_checked(client, symbol, sessions)
         if not rows:
             raise DataError("the Kalex store has no %s rows for %s..%s" % (symbol, sessions[0], sessions[-1]))
         return history_doc(symbol, rows, cal, start, end, now=real, source="kalex", adjusted=True)
@@ -600,7 +637,7 @@ def fetch_history_doc(client, cal, symbol, start, end, source="auto", clock=None
     cache = _cache(cache)
     try:
         if cache is not None:
-            cache.invalidate_split(symbol, client.splits(symbol=massive_symbol(symbol)))
+            cache.invalidate_split(massive_symbol(symbol), client.splits(symbol=massive_symbol(symbol)))
         done = [d for d in sessions if d != real.date()]
         rows = range_rows(client, cal, symbol, done, interval, cache) if done else []
         snap = None

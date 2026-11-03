@@ -68,18 +68,20 @@ class Kalex(unittest.TestCase):
         self.assertEqual(K.et_of_ms(raw[0]["t"]).strftime("%H:%M"), "04:00")
         early = LS.kalex_5m("tsla", "2025-11-28", "2025-11-28")
         self.assertIsNone(early[0]["vw"])
-        got = B.bars_5m("TSLA", "2025-11-28", "2026-10-19", source="kalex", cal=CAL)
+        info = {}
+        got = B.bars_5m("TSLA", "2025-11-28", "2026-10-19", source="kalex", cal=CAL, client=_mj.client(), info=info)
+        self.assertEqual(info, {"source": "kalex", "adjusted": True, "as_of": "2026-10-19"})
         self.assertEqual(len(got), 42 + 78)                        # regular hours only, 42 on the early close
         self.assertEqual(len(got[0]), 6)
         self.assertEqual(K.et_of_ms(got[-1][0]).strftime("%H:%M"), "15:55")
-        doc = Y.fetch_history_doc(None, CAL, "TSLA", "2026-10-19", "2026-10-19", source="kalex")
+        doc = Y.fetch_history_doc(_mj.client(), CAL, "TSLA", "2026-10-19", "2026-10-19", source="kalex")
         m = doc["chart"]["result"][0]["meta"]
         self.assertEqual((len(doc["chart"]["result"][0]["timestamp"]), m["mjonir"]["source"]), (78, "kalex"))
         cov = LS.kalex_coverage("TSLA")
         self.assertEqual((cov["first_day"], cov["last_day"], cov["n"]), ("2025-11-28", "2026-10-19", 192 + 121))
         self.assertIsNone(LS.kalex_coverage("ZZZZ"))
         # auto picks the store when it holds the whole range
-        auto = Y.fetch_history_doc(None, CAL, "TSLA", "2026-10-19", "2026-10-19")
+        auto = Y.fetch_history_doc(_mj.client(), CAL, "TSLA", "2026-10-19", "2026-10-19")
         self.assertEqual(auto["chart"]["result"][0]["meta"]["mjonir"]["source"], "kalex")
         conn = LS.kalex_connect()
         with self.assertRaises(sqlite3.OperationalError):
@@ -93,7 +95,33 @@ class Kalex(unittest.TestCase):
 
     def test_empty_is_an_error(self):
         with self.assertRaises(Y.DataError):
-            B.bars_5m("ZZZZ", "2026-10-19", "2026-10-19", source="kalex", cal=CAL)
+            B.bars_5m("ZZZZ", "2026-10-19", "2026-10-19", source="kalex", cal=CAL, client=_mj.client())
+
+    def test_a_split_after_the_store_ends_is_refused(self):
+        late = {"/v3/reference/splits": lambda url, path, q: {"status": "OK", "results": [
+            {"ticker": "TSLA", "execution_date": "2020-08-31", "split_from": 1, "split_to": 5},
+            {"ticker": "TSLA", "execution_date": "2026-11-20", "split_from": 1, "split_to": 2}]}}
+        c = _mj.client(_mj.FakeOpener(extra=late))
+        for call in (lambda: B.bars_5m("TSLA", "2026-10-19", "2026-10-19", source="kalex", cal=CAL, client=c),
+                     lambda: B.bars_5m("TSLA", "2026-10-19", "2026-10-19", cal=CAL, client=c),      # auto
+                     lambda: Y.fetch_history_doc(c, CAL, "TSLA", "2026-10-19", "2026-10-19", source="kalex")):
+            with self.assertRaises(Y.DataError) as cm:
+                call()
+            self.assertEqual(cm.exception.outcome, "refused")
+            self.assertIn("2-for-1 on 2026-11-20", str(cm.exception))
+            self.assertIn("coverage end 2026-10-19", str(cm.exception))
+
+    def test_no_client_no_check_unverified(self):
+        from mjonir import config as C
+        saved = C.env_layers
+        C.env_layers = lambda repo=None, environ=None: {}
+        try:
+            with self.assertRaises(Y.DataError) as cm:
+                B.bars_5m("TSLA", "2026-10-19", "2026-10-19", source="kalex", cal=CAL)
+            self.assertEqual(cm.exception.outcome, "unverified")
+            self.assertIn("adjusted as of 2026-10-19", str(cm.exception))
+        finally:
+            C.env_layers = saved
 
 
 class FlatFiles(unittest.TestCase):
@@ -152,8 +180,12 @@ class Cache(unittest.TestCase):
         self.assertEqual(c.get_session("TSLA", "5m", "2026-10-19"), [dict(r) for r in AGGS])
         self.assertIsNone(c.get_session("TSLA", "5m", "2026-10-19", src="kalex"))
         self.assertIsNone(c.get_session("TSLA", "5m", "2026-10-16"))
-        c.put_session("HALT", "5m", "2026-10-16", [], "massive")
-        self.assertEqual(c.get_session("HALT", "5m", "2026-10-16"), [])        # known empty, not unknown
+        self.assertEqual(c.put_session("HALT", "5m", "2026-10-16", [], "massive"), 0)   # writes nothing
+        self.assertIsNone(c.get_session("HALT", "5m", "2026-10-16"))
+        self.assertIsNone(c.coverage("HALT", "5m", "2026-10-16"))
+        with c.conn:     # an n=0 coverage row left by an older build is a miss, never "no bars"
+            c.conn.execute("INSERT INTO coverage VALUES ('OLD','5m','2026-10-16','2026-10-16',NULL,NULL,0,'massive',1,'x')")
+        self.assertIsNone(c.get_session("OLD", "5m", "2026-10-16"))
         g = {"SPY": {"t": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1, "vw": 1, "n": 1}}
         self.assertEqual(c.put_grouped("2026-10-19", g), 1)
         self.assertEqual(c.get_grouped("2026-10-19")["SPY"]["c"], 1)
@@ -189,10 +221,71 @@ class Cache(unittest.TestCase):
         self.assertEqual(op.calls, [])
 
 
+class EmptyAndKeys(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "c.sqlite3")
+
+    def test_a_session_the_answer_lacks_is_asked_again(self):
+        ranged = {"/v2/aggs/ticker/TSLA/range/5/minute/2026-10-16/2026-10-19":
+                  lambda url, path, q: _mj.fixture("aggs-TSLA-5m-2026-10-19.json")}
+        op = _mj.FakeOpener(extra=ranged)
+        c = CA.Cache(self.path)
+        rows = Y.range_rows(_mj.client(op), CAL, "TSLA", CAL.sessions_between("2026-10-16", "2026-10-19"), "5m", c)
+        self.assertEqual(len(rows), 192)
+        self.assertIsNotNone(c.coverage("TSLA", "5m", "2026-10-19"))
+        self.assertIsNone(c.coverage("TSLA", "5m", "2026-10-16"))               # no row for the missing session
+        op2 = _mj.FakeOpener()
+        stats = {}
+        Y.range_rows(_mj.client(op2), CAL, "TSLA", CAL.sessions_between("2026-10-16", "2026-10-19"), "5m", c, stats)
+        self.assertEqual([u.split("?")[0].rsplit("/", 2)[-2:] for u in op2.calls], [["2026-10-16", "2026-10-16"]])
+        self.assertEqual((stats["cached"], stats["fetched"], stats["requests"]), (1, 1, 1))
+        c.close()
+
+    def test_brk_dot_b_and_brk_dash_b_share_one_session(self):
+        brk = {"/v2/aggs/ticker/BRK.B/": lambda url, path, q: _mj.fixture("aggs-TSLA-5m-2026-10-19.json")}
+        op = _mj.FakeOpener(extra=brk)
+        c = CA.Cache(self.path)
+        Y.session_rows(_mj.client(op), CAL, "BRK-B", "2026-10-19", "5m", c)
+        op2 = _mj.FakeOpener(extra=brk)
+        self.assertEqual(len(Y.session_rows(_mj.client(op2), CAL, "brk.b", "2026-10-19", "5m", c)), 192)
+        self.assertEqual(op2.calls, [])
+        self.assertIsNotNone(c.coverage("BRK.B", "5m", "2026-10-19"))
+        c.close()
+
+    def test_a_split_also_drops_stale_grouped_rows(self):
+        c = CA.Cache(self.path, clock="2026-10-20 08:00")
+        g = {"SPY": {"t": 1, "c": 1.0}, "TSLA": {"t": 1, "c": 368.06}}
+        c.put_grouped("2026-10-16", g)
+        c.put_grouped("2026-10-19", g)
+        c.close()
+        c = CA.Cache(self.path, clock="2026-10-23 08:00")
+        c.put_grouped("2026-10-22", g)                                          # fetched after the split
+        c.invalidate_split("TSLA", [{"execution_date": "2026-10-21"}])
+        self.assertIsNone(c.get_grouped("2026-10-16"))                          # a miss: fetched again, adjusted
+        self.assertIsNone(c.get_grouped("2026-10-19"))
+        self.assertEqual(sorted(c.get_grouped("2026-10-22")), ["SPY", "TSLA"])
+        c.close()
+
+
 class Interfaces(unittest.TestCase):
     def test_bars_daily_adv_quote(self):
         c = _mj.client()
-        got = B.bars_5m("TSLA", "2026-10-19", "2026-10-19", client=c, cal=CAL, source="api", cache=None)
+        info = {}
+        got = B.bars_5m("TSLA", "2026-10-19", "2026-10-19", client=c, cal=CAL, source="api", cache=None, info=info)
+        self.assertEqual(info, {"source": "api", "adjusted": True, "as_of": K.today_et().isoformat()})
+        path = os.path.join(tempfile.mkdtemp(), "c.sqlite3")
+        B.bars_5m("TSLA", "2026-10-19", "2026-10-19", client=c, cal=CAL, source="api", cache=CA.Cache(path))
+        B.bars_5m("TSLA", "2026-10-19", "2026-10-19", client=c, cal=CAL, source="api", cache=CA.Cache(path), info=info)
+        self.assertEqual((info["source"], info["adjusted"]), ("cache", True))
+        self.assertEqual(info["as_of"], K.today_et().isoformat())               # fetched today, in this test
+        c2 = CA.Cache(path)
+        with c2.conn:   # a fetch stamped 03:30 UTC on Nov 3 is the evening of Nov 2 in New York
+            c2.conn.execute("UPDATE coverage SET fetched_at='2026-11-03T03:30:00Z'")
+        B.bars_5m("TSLA", "2026-10-19", "2026-10-19", client=c, cal=CAL, source="api", cache=c2, info=info)
+        self.assertEqual((info["source"], info["as_of"]), ("cache", "2026-11-02"))
+        d_info = {}
+        B.daily("TSLA", "2026-10-16", "2026-10-19", client=c, cal=CAL, cache=None, info=d_info)
+        self.assertEqual(d_info["source"], "api")
         self.assertEqual(len(got), 78)
         self.assertEqual(got[8][4], 364.176)
         raw = B.bars_5m("TSLA", "2026-10-19", "2026-10-19", rth_only=False, client=c, cal=CAL, source="api", cache=None)

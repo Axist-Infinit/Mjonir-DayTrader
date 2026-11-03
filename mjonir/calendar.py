@@ -418,8 +418,8 @@ class Calendar(object):
 
     # -- bars
     def rth_filter(self, rows, t_key="t"):
-        """Rows (``t`` = bar START in ms) inside the regular session of their own New York date,
-        on the 5-minute grid of that session's open."""
+        """Rows (``t`` = bar START in ms) inside the regular session of their own New York date. No grid
+        check here (the same filter serves 1-minute and 5-minute rows); the scripts drop off-grid bars."""
         out = []
         bounds = {}
         for r in rows:

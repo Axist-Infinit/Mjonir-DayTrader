@@ -81,8 +81,11 @@ class Cache(object):
     @_locked
     def put_session(self, symbol, res, day, rows, src, adjusted=True):
         """Store one COMPLETE session's rows (raw, extended hours included). Refuses today or later,
-        and refuses rows dated another day. An empty list is stored as known-empty coverage."""
+        and refuses rows dated another day. An empty list writes nothing: an answer that lacked a
+        session is never remembered as "no bars" (the next call asks again)."""
         day = K.as_date(day)
+        if not rows:
+            return 0
         if not self._complete(day):
             raise CacheError("refusing to cache %s %s %s: the session is not over (today or later)"
                              % (symbol, res, day))
@@ -121,10 +124,8 @@ class Cache(object):
     def get_session(self, symbol, res, day, src=None):
         """The stored rows of one session, or None when it was never stored (or from another src)."""
         cov = self.coverage(symbol, res, day)
-        if cov is None or (src and cov["src"] != src):
-            return None
-        if not cov["n"]:
-            return []
+        if cov is None or (src and cov["src"] != src) or not cov["n"]:
+            return None   # never stored, another source, or an empty row from an older build: a miss
         rows = self.conn.execute(
             "SELECT t,o,h,l,c,v,vw,n FROM bars WHERE symbol=? AND res=? AND t BETWEEN ? AND ? ORDER BY t",
             (symbol.upper(), res, cov["first_t"], cov["last_t"])).fetchall()
@@ -142,7 +143,10 @@ class Cache(object):
     @_locked
     def invalidate_split(self, symbol, splits):
         """Drop every cached row of `symbol` fetched before a split that executed after it was
-        fetched: those rows are adjusted to the old share count. Returns the rows dropped."""
+        fetched: those rows are adjusted to the old share count. Its grouped-daily rows dated on or
+        before the split and fetched by then go too, which makes those grouped days a cache miss (the
+        day's count no longer matches) and they are fetched again, adjusted. Returns the bar rows
+        dropped."""
         sym = symbol.upper()
         dropped = 0
         for s in splits or []:
@@ -158,6 +162,8 @@ class Cache(object):
                         dropped += self.conn.execute(
                             "DELETE FROM bars WHERE symbol=? AND res=? AND t BETWEEN ? AND ?", (sym, res, a, b)).rowcount
                     self.conn.execute("DELETE FROM coverage WHERE symbol=? AND res=? AND req_from=?", (sym, res, day))
+                self.conn.execute("DELETE FROM grouped WHERE T=? AND date<=? AND substr(fetched_at,1,10)<=?",
+                                  (sym, ex, ex))
         return dropped
 
     # ------------------------------------------------------------ grouped daily

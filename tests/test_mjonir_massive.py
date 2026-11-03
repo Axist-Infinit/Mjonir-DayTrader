@@ -2,10 +2,14 @@
 the three probe outcomes, redaction, the not-entitled guard, pacing, and the snapshot units."""
 
 import http.client
+import http.server
 import json
+import os
+import threading
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 
 import _mj
 from mjonir import massive as M
@@ -147,17 +151,82 @@ class Transport(unittest.TestCase):
         self.assertIn("/NOPE%20NOPE/", op.calls[0])
 
     def test_no_key_no_client(self):
-        import os
-        saved = {k: os.environ.pop(k) for k in list(os.environ) if k in M.C.KEY_NAMES or k == "INFINIT_ROOT"}
-        os.environ["INFINIT_ROOT"] = "/nonexistent-mjonir-test"
+        saved = M.C.env_layers
+        M.C.env_layers = lambda repo=None, environ=None: {}     # no layer holds a key, on any box
         try:
-            if M.C.api_key() is None:
-                with self.assertRaises(M.MassiveError) as cm:
-                    M.Client()
-                self.assertIn("~/Infinit/.env", str(cm.exception))
+            self.assertIsNone(M.C.api_key())
+            with self.assertRaises(M.MassiveError) as cm:
+                M.Client()
+            self.assertIn("~/Infinit/.env", str(cm.exception))
+            self.assertEqual(cm.exception.outcome, "unverified")
         finally:
-            os.environ.pop("INFINIT_ROOT")
-            os.environ.update(saved)
+            M.C.env_layers = saved
+
+    def test_a_page_without_resultscount_is_refused(self):
+        def bare(url, headers, timeout):
+            return json.dumps({"status": "OK", "results": [{"t": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]}).encode()
+        with self.assertRaises(M.Refused) as cm:
+            _mj.client(bare).aggregates("TSLA", 5, "minute", "2026-10-19", "2026-10-19")
+        self.assertIn("no resultsCount", str(cm.exception))
+
+
+class Quiet(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+class Redirects(unittest.TestCase):
+    """The default opener never follows a redirect: the Authorization header would go with it."""
+
+    def serve(self, handler):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv
+
+    def test_a_301_to_another_host_is_refused_and_never_followed(self):
+        hits = []
+
+        class Target(Quiet):
+            def do_GET(self):
+                hits.append((self.path, self.headers.get("Authorization")))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+        target = self.serve(Target)
+        other = "http://127.0.0.1:%d/stolen" % target.server_port
+
+        class Origin(Quiet):
+            def do_GET(self):
+                self.send_response(301)
+                self.send_header("Location", other)
+                self.end_headers()
+        origin = self.serve(Origin)
+        old = os.environ.get("no_proxy")
+        os.environ["no_proxy"] = "127.0.0.1,localhost"
+        try:
+            c = M.Client(key=KEY, base_url="http://127.0.0.1:%d" % origin.server_port,
+                         pace=M.Pace(10 ** 9, sleep=lambda s: None), sleep=lambda s: None)
+            with self.assertRaises(M.MassiveError) as cm:
+                c.market_status_now()
+        finally:
+            if old is None:
+                os.environ.pop("no_proxy")
+            else:
+                os.environ["no_proxy"] = old
+        e = cm.exception
+        self.assertEqual((e.status, e.outcome, c.requests), (301, "refused", 1))   # refused, not retried
+        self.assertIn("redirect refused from", str(e))
+        self.assertFalse(KEY in str(e))
+        self.assertEqual(hits, [])                                                # the second host never asked
+
+    def test_the_handler_itself_raises(self):
+        h = M._NoRedirect()
+        req = urllib.request.Request("https://api.massive.com/v1/x", headers={"Authorization": "Bearer " + KEY})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            h.redirect_request(req, None, 302, "Found", {}, "https://elsewhere.example/x")
+        self.assertEqual(cm.exception.code, 302)
 
 
 class NotEntitled(unittest.TestCase):
@@ -191,6 +260,15 @@ class Pacing(unittest.TestCase):
         self.assertEqual(M.Pace(1200).capacity, 20.0)
         with self.assertRaises(ValueError):
             M.Pace(0)
+
+    def test_the_request_count_is_exact_under_threads(self):
+        c = _mj.client()
+        threads = [threading.Thread(target=lambda: [c.market_status_now() for _ in range(50)]) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(c.requests, 400)
 
     def test_snapshot_chunks_of_200(self):
         op = _mj.FakeOpener()

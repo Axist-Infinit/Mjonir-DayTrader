@@ -9,7 +9,8 @@ Builder: Opus (claude-opus-5-5). Written Mon 2026-11-02 23:59 EST. Branch `feat/
 | --- | --- | --- |
 | 1a, the `mjonir/` package, its tests, nine recorded fixtures | `4d4ca5f` | yes |
 | 1b, the bridge, the wiring, the overlay, the docs, the replay | `5531f77` | yes |
-| this review | the commit that adds this file; see `git log` | pushed with it |
+| this review | `949d0c5` | yes |
+| 1c, the review fixes (section 9) | the commit that adds section 9; see `git log` | pushed with it |
 
 Explicit `git add` paths only; no force-push, no amend. Each message ends with both trailers (the
 brief's `Claude Fable 5.1` line and the harness's `Claude Opus 5.5` line), as chunk 0 did.
@@ -104,13 +105,13 @@ nonexistent ones, so no test opens a real store.
 ```
 
 Verdicts: opening range, trigger bar and price, `10:12` waiting, `09:44` forming, scan overlap (95.2
-percent), `pool_sessions` and `triggered`: pass. Bar volumes within 3 percent: 13 of 15 bars, the two
-misses are Yahoo's (09:30: Yahoo 54 percent above the whole consolidated tape; Massive equals the tape
-minus the condition-16 official-open duplicate; 10:30: Yahoo 13.2M where the tape holds 553,401). The
-scan's three differences are NOT "a cent at the range high": the range highs agree to the cent, the
-deciding bar's close differs by 11 to 43 cents; in each case Massive's close is a print on the tape and
-Yahoo's matches none of the window's last prints. The time machine's one flipped outcome (2026-08-06)
-is a 3-cent entry difference moving the 1R target by 6 cents.
+percent), `pool_sessions` and `triggered`: pass. As restated in review 1c: closes within $0.05 on 15 of
+15 bars and volume within 0.1 percent on 13 of 15, the two exceptions (09:30, 10:30) traceable to
+Massive's consolidated tape with Yahoo's basis not established; and every scan difference traced to the
+deciding bar's close (11 to 43 cents apart between vendors, range highs equal to the cent). The
+reference is Massive's own `/v3/trades` tape, so these trace Massive's bars; they do not show which
+vendor is right. The time machine's one flipped outcome (2026-08-06) is a 3-cent entry difference moving
+the 1R target by 6 cents.
 
 ## 4. Universe and the daily scan
 
@@ -205,11 +206,9 @@ documents. No write was accepted (the tests pin that on a synthetic store). No O
 
 ## 8. Owed, uncertain, and decisions for the lead
 
-- OWED to the lead, market closed: the LIVE `watch` timing (bar lines within seconds of each 5-minute
-  close). The replay path is measured; the live clock path is not.
-- Acceptance lines not met as written, both explained in section 3: bar volumes within 3 percent (2 of
-  15 bars, Yahoo's), and "every scan difference a cent at the range high" (vendor bar closes 11 to 43
-  cents apart).
+- OWED, to be measured in the first live session: the LIVE `watch` timing (bar lines within seconds of
+  each 5-minute close). The replay path is measured; the live clock path is not.
+- Two acceptance lines were restated by the review (1c) to what was measured; see section 3.
 - `tests/_load.py` (an upstream test helper) changed in 1a: it sets `TRADER_CALENDAR=/dev/null` and drops
   `TRADER_SOURCE`, so a local `trader/calendar.json` or an exported source never reaches upstream's tests
   (test_alerts pins the exact seed lists; test_entry and test_alerts pin `calendar_known` False for 2028).
@@ -236,3 +235,31 @@ documents. No write was accepted (the tests pin that on a synthetic store). No O
   scratchpad and was deleted before 1a.
 - The worktree's `trader/` (calendar, universe, cache with 124,163 bars, replay files) is local and
   gitignored; the main checkout has none until `bridge calendar` and `bridge universe` run there.
+
+## 9. Review fixes (1c)
+
+Review verdict: APPROVE WITH SHOULDs, no MUST. Suite after 1c: 432 OK (9.4 s). Each item and its pin:
+
+| item | change | pinned by |
+| --- | --- | --- |
+| S1 redirects | `massive._urlopen` uses one opener whose `_NoRedirect` handler raises on any 3xx; `_fetch` maps 3xx to `MassiveError("redirect refused from <endpoint> (HTTP n)")`, outcome refused, not retried. Stock `urlopen` was shown to forward the Bearer header to the redirect target | `test_mjonir_massive.Redirects`: a local server answers 301 to a second local server, which is never asked; status 301, refused, one request, no key in the message; and the handler raising on its own |
+| S2 empty sessions | `session_rows` / `range_rows` never cache an empty session; `Cache.put_session([])` writes nothing; `get_session` treats an n=0 coverage row (an older build's) as a miss | `test_mjonir_stores.EmptyAndKeys.test_a_session_the_answer_lacks_is_asked_again` (no row for the missing session, the second call asks for exactly it); `Cache.test_complete_sessions_only` (empty write, old n=0 row) |
+| S3 Kalex splits and `info` | `yahoo_shape.kalex_rows_checked`: Kalex rows are refused (naming the split) when the symbol split after the store's coverage end, unverified when no client can ask; used by `bars_5m` (auto and kalex) and `fetch_history_doc` (kalex), so `bridge history --source kalex` now needs the key. The API path drops cached rows a later split made stale. `bars_5m` and `daily` take `info=` and fill `{source: api, cache, kalex or flatfile, adjusted, as_of}` (as_of a New York date) | `test_mjonir_stores.Kalex.test_a_split_after_the_store_ends_is_refused` (kalex, auto, history), `test_no_client_no_check_unverified`, the `info` asserts in `Kalex.test_raw_rows...` and `Interfaces.test_bars_daily_adv_quote` (api, cache, a UTC stamp read as the New York date, daily) |
+| S4 resultsCount | `aggregates` refuses a page without `resultsCount`, like `check_grouped`. Checked live first: all 10 pages of a 2-year TSLA 5m answer carry it | `test_mjonir_massive.Transport.test_a_page_without_resultscount_is_refused` |
+| S5 no-key test | the test empties the env layers itself and asserts the refusal on every box | `test_mjonir_massive.Transport.test_no_key_no_client` |
+| S6 replay wording | "traceable to Massive's consolidated tape; Yahoo's basis not established"; the two acceptance lines restated to what was measured; the live `watch` timing stays owed for the first live session | docs/reviews/replay-tsla-2026-10-19.md (verdict table, explanations) |
+| N cache key | the cache key is `massive_symbol()` in `session_rows` / `range_rows` / the split invalidation | `EmptyAndKeys.test_brk_dot_b_and_brk_dash_b_share_one_session` |
+| N dead clock | `session_rows(..., clock=None)` removed; `session_rows`, `bars_5m` and `daily` document that "complete" is judged by the real clock and a replay cuts by its own now | docstrings |
+| N bridge `--now` | the docstring names the verbs `--now` moves and the three that ignore it | docstring |
+| N timemachine source | under `--source massive` the output's `source` is the history document's own `meta.mjonir.source` (massive, kalex or flatfile); +2 lines in timemachine.py (38 now) | `test_source_wiring.TimeMachine.test_the_source_is_the_documents_own` |
+| N request counter | `Client.requests` is incremented under a lock | `test_mjonir_massive.Pacing.test_the_request_count_is_exact_under_threads` (8 threads x 50 calls = 400) |
+| N test_repo walk | skips only `.claude/worktrees`, `trader` and `.pytest_cache`; `.claude` stays tolerated in the root listing | checked by hand: an em dash in `.claude/skills/x/SKILL.md` fails the pin, one in `.claude/worktrees/y/notes.md` does not (both files removed) |
+| N rth_filter | the docstring no longer claims a grid check (the filter serves 1m and 5m; the scripts drop off-grid bars) | docstring |
+| N grouped split rows | `Cache.invalidate_split` also deletes the symbol's grouped rows dated on or before the split and fetched by then, so those days become a miss and are fetched again, adjusted. The universe's ADV$ (close x volume) is split-invariant | `EmptyAndKeys.test_a_split_also_drops_stale_grouped_rows` |
+
+Side finding while checking S4: Massive pages 5-minute aggregates at about 10,000 rows (each page
+covers 50,000 underlying minute bars), so 2 years of TSLA is 10 pages and about 9 to 10 years would
+reach the 50-page refusal. `--years` beyond that will refuse rather than truncate.
+
+Kalex sha256 after the 1c live checks (2026-11-03T05:23:27Z): unchanged,
+`2f5b1750164bd08db49bda4c9a2b2d4d1f24a3b32d5ec055ec1feef0bb39f45b`.

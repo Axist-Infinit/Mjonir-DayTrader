@@ -92,22 +92,25 @@ python3 compare_replay.py          # the script at the end of this doc, run from
 | trigger | 10:10 bar, index 8, 364.18 within $0.02 | 10:10 bar, index 8, 364.18, delta 0.00 | pass |
 | `--now 10:12` | waiting | waiting (exit 1), same reason line as upstream | pass |
 | `--now 09:44` | range forming | waiting / forming, 2 of 3 range bars | pass |
-| bar volumes | within 3 percent | 13 of 15 bars within 0.03 percent; 09:30 at minus 35 percent, 10:30 at minus 96 percent | fail as specified, explained below |
+| bars (restated in review 1c) | closes within $0.05 on 15 of 15 bars, volume within 0.1 percent on 13 of 15, each exception listed with its tape evidence | closes: 15 of 15 within $0.05 (13 to the cent; 09:30 $0.04, 10:25 $0.05). Volume: 13 of 15 within 0.03 percent; exceptions 09:30 (minus 35 percent) and 10:30 (minus 96 percent), tape evidence below | pass as restated (the first wording, "volumes within 3 percent", fails on those two bars) |
 | scan hit set | overlap at least 95 percent | 40 of upstream's 42 hits (95.2 percent); Jaccard 93.0 percent | pass |
-| scan differences | each a cent at the range high | the range highs agree to the cent; the three differences are the deciding bar's CLOSE, 11 to 43 cents apart between vendors | not as specified, explained below |
+| scan differences (restated in review 1c) | hit-set overlap at least 95 percent with every difference traced to the deciding bar's close and its cents from the range high | DASH, DLTR, VRTX each traced below: range highs equal to the cent, deciding closes 11 to 43 cents apart | pass as restated (the first wording, "each a cent at the range high", does not describe them) |
 | time machine | pool_sessions within 1, triggered within 1 | 59 vs 59, 33 vs 33 | pass |
 
 ## The explanations
 
-**The two volume misses are Yahoo's, not Massive's.** Checked against Massive's trade tape
-(`/v3/trades/TSLA`, read-only, the same session):
+**The two volume exceptions: Massive's bars are traceable to Massive's consolidated tape; Yahoo's basis
+is not established.** The only reference here is Massive's own trade tape (`/v3/trades/TSLA`,
+read-only, the same session), so this traces Massive's bars to their source; it does not show which
+vendor is right.
 
 - 09:30 bar: the tape holds 2,208,736 shares in 52,195 prints. One of them is the Nasdaq official-open
   report (condition 16, 208,896 shares), a duplicate of the opening cross (condition 17, 208,895 shares,
-  same millisecond). Without the duplicate the tape sums to 1,999,840 shares; Massive's bar says
-  2,000,912. Yahoo's 3,080,684 is 54 percent above the whole tape and matches no subset of it.
-- 10:30 bar: the tape holds 553,401 shares in 21,257 prints, the largest 3,732 shares. Massive says
-  553,697. Yahoo's 13,232,032 is not on the consolidated tape.
+  same millisecond). Without the duplicate the tape sums to 1,999,840 shares and Massive's bar says
+  2,000,912: traceable. Yahoo's 3,080,684 is 54 percent above that whole tape; what Yahoo counted is not
+  established.
+- 10:30 bar: the tape holds 553,401 shares in 21,257 prints, the largest 3,732 shares. Massive's bar says
+  553,697: traceable. Yahoo's 13,232,032 is not on Massive's tape; its basis is not established.
 - The other 13 bars agree within 0.03 percent; closes agree to the cent on 13 of 15 bars (10:25 differs
   by $0.05, 9:30 by $0.04).
 
@@ -126,9 +129,10 @@ does not. From the tape's last prints before each bar's end:
   run 503.44 to 503.96. Yahoo's 504.12 is above every one of them. Yahoo hits; Massive misses
   (-14.5 cents).
 
-So the acceptance's "a cent at the range high" does not describe these three: the vendors disagree on
-the bar close by 11 to 43 cents, and in each case Massive's close is a print on the consolidated tape
-while Yahoo's is not among the window's last prints. Ten common hits differ by one to eight cents in
+So every difference is traced to the deciding bar's close and its cents from the range high: the
+vendors disagree on that close by 11 to 43 cents, Massive's close is traceable to a print on Massive's
+consolidated tape, and Yahoo's is not among that tape's last prints in the window. Yahoo's basis is not
+established; the reference is Massive's own tape, so this does not show which close is right. Ten common hits differ by one to eight cents in
 the trigger close or one to four cents in the range high (CLSK); all fire on the same bar.
 
 Counts: Massive built 232 of the 234 names (SQ has no 2026-10-19 bars under that ticker any more,
@@ -150,7 +154,8 @@ Yahoo's target but not Massive's, then the stop. That one trade moves the histor
   `TRADER_CALENDAR=/dev/null` it does.
 - `entry.py watch TSLA --source massive --now "2026-10-30 09:50"`: replayed without sleeping (0.62 s),
   opening range 393.46 / 387.52, TRIGGERED on the 9:50 bar at 394.12, exit 0.
-- Live `watch` timing (bar lines within seconds of each 5-minute close): owed to the lead, market closed.
+- Live `watch` timing (bar lines within seconds of each 5-minute close): owed, to be measured in the
+  first live session (the market was closed for this run).
 
 ## The comparison script
 

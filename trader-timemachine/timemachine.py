@@ -714,6 +714,8 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     sym = plan["symbol"]
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
+    if source == "massive":  # the history document names its own store (massive, kalex or flatfile)
+        source = (meta.get("mjonir") or {}).get("source") or source
     msym = str(meta.get("symbol") or "").upper()
     if msym and msym != sym.replace(".", "-"):
         raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
