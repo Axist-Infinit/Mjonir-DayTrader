@@ -11,7 +11,8 @@ from _load import load, ROOT, FIX
 ticket = load("trader-broker", "ticket")
 check = load("trader-risk", "check")
 
-CFG_PATH = os.path.join(ROOT, "trader-budget", "config.example.json")
+# Mjonir chunk 3.2: the chunk 2 example (upstream's dollar limits) kept as a fixture; the example is the percent one
+CFG_PATH = os.path.join(FIX, "trader-budget", "config-upstream.json")
 ORDERS_PATH = os.path.join(FIX, "trader-risk", "orders-tsla.json")
 PLAN_PATH = os.path.join(FIX, "trader-budget", "plan-tsla.json")
 NOW = "2026-10-19 10:15"

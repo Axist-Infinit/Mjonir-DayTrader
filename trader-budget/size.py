@@ -41,6 +41,22 @@ and the reward:risk refusal reads the NET ratio ("min_reward_risk_basis":
 close) writes an OTO order (the entry and its stop-loss, no take-profit: you
 flatten by flat_by) and skips the reward:risk refusal with a note.
 
+Percent of a trade notional (Mjonir chunk 3.2; a "sizing" block in the
+config, mjonir/limits.py derive_limits): each trade is sized against
+sizing.trade_notional_usd (the owner's $100,000 unit) and its max loss is
+max_loss_pct_of_notional of it; no budget or equity figure is used.
+
+    shares = floor(min(notional / entry,
+                       (notional x max_loss_pct / 100 - 2 x commission)
+                       / (risk + round-trip slippage)))
+
+then one share less while the net max loss is still over the cap. A legacy
+dollar key also in the config (max_loss_per_trade_usd, max_order_usd, a
+budget) is a second limit: the stricter applies and the report says so. The
+report prints the shares, the notional in dollars and as a percent of the
+trade notional, the risk in dollars and percent, and the net max loss.
+Without a "sizing" block the budget rules above apply, as upstream.
+
 Weights mode (kept from v1, no longer the headline): split a budget across a
 list of stocks by weight.
 
@@ -204,10 +220,26 @@ def read_json(path, what):
 
 
 def load_config(path):
+    """The config over DEFAULTS. A percent config (a "sizing" block) comes back as written: its dollar limits
+    are derived from the percents (mjonir/limits.py), never from upstream's dollar defaults."""
     cfg = dict(DEFAULTS)
     if path and os.path.exists(path):
-        cfg.update(read_json(path, "config"))
+        doc = read_json(path, "config")
+        if isinstance(doc, dict) and isinstance(doc.get("sizing"), dict):
+            return doc
+        cfg.update(doc)
     return cfg
+
+
+def derived_limits(cfg):
+    """mjonir.limits.derive_limits(cfg) for a percent config, else None (upstream's budget rules)."""
+    lm = _measure("limits")
+    if not lm.is_notional(cfg):
+        return None
+    try:
+        return lm.derive_limits(cfg)
+    except lm.LimitsError as e:
+        raise SizeError("config: %s" % e)
 
 
 def _f(x):
@@ -348,6 +380,7 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     no_costs  gross only (upstream's mechanics)"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
+    lim = derived_limits(cfg or {})
     if not isinstance(plan, dict):
         raise SizeError("the plan is not a JSON object")
     sym = str(plan.get("symbol") or "").strip().upper()
@@ -369,12 +402,13 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     if sym in blocked:
         raise SizeError("%s is on your blocked list" % sym)
 
-    budget = float(budget if budget is not None else (c.get("budget") or 0))
-    if budget <= 0:
-        raise SizeError("no budget: pass --budget or set \"budget\" in trader/config.json")
-    buf_pct = float(c.get("cash_buffer_pct") or 0)
-    if not 0 <= buf_pct < 100:
-        raise SizeError("cash_buffer_pct must be between 0 and 100")
+    if lim is None:
+        budget = float(budget if budget is not None else (c.get("budget") or 0))
+        if budget <= 0:
+            raise SizeError("no budget: pass --budget or set \"budget\" in trader/config.json")
+        buf_pct = float(c.get("cash_buffer_pct") or 0)
+        if not 0 <= buf_pct < 100:
+            raise SizeError("cash_buffer_pct must be between 0 and 100")
 
     if limit is not None:
         ref, ref_from = round_cent(limit), "limit"
@@ -397,6 +431,9 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     slip_rt = 2.0 * ref * side_bps / 1e4            # slippage and half spread, both sides, a share
     costs_on = slip_rt > 0 or commission > 0
 
+    if lim is not None:
+        return _size_notional(plan, c, lim, sym, entry_plan, ref, ref_from, stop, target, risk_c, reward_c, risk,
+                              side_bps, commission, cost_from, slip_rt, costs_on, cash)
     cash_buffer = round(budget * buf_pct / 100.0, 2)
     available = budget - cash_buffer
     cash_note = "budget %s minus the %s cash buffer" % (money(budget), money(cash_buffer))
@@ -490,6 +527,120 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     return out
 
 
+def _refusals(c, sym, ref, stop, target, risk, risk_c, reward_c, rt, rr_net, costs_on, qty, cost, plan, flat_by):
+    """(refusal or None, notes): the reward:risk and minimum-order refusals, the same words in both modes."""
+    basis = str(c.get("min_reward_risk_basis") or "net")
+    if basis not in ("net", "gross"):
+        raise SizeError("min_reward_risk_basis is net or gross, not %r" % c.get("min_reward_risk_basis"))
+    if reward_c is None:
+        return None, ["No target: an OTO order (the entry and its stop-loss); flatten by %s. Reward:risk is not "
+                      "measured, so the min_reward_risk refusal is skipped (trader-risk checks allow_no_target)."
+                      % flat_by]
+    if costs_on and basis == "net" and _f(c.get("min_reward_risk")) and rr_net < _f(c["min_reward_risk"]) - EPS:
+        return ("net reward:risk %.2f (gross %.2f; target %s, entry %s, stop %s, a %.4f a share round trip) is "
+                "under your minimum %s, so trader-risk would block it. No order. Skip it, or make a new plan with "
+                "trader-exit." % (rr_net, reward_c / float(risk_c), _price(target), _price(ref), _price(stop), rt,
+                                  _num(c["min_reward_risk"]))), []
+    if not (costs_on and basis == "net") and _f(c.get("min_reward_risk")) and \
+            reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
+        return ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
+                "would block it. No order. Skip it, or make a new plan with trader-exit."
+                % (reward_c / float(risk_c), _price(target), _price(ref), _price(stop), _num(c["min_reward_risk"]))), []
+    if cost < float(c.get("min_order_usd") or 0) - 0.005:
+        return ("%d share%s of %s is %s, under your %s minimum order. No order."
+                % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_usd"]))), []
+    return None, []
+
+
+def _size_notional(plan, c, lim, sym, entry_plan, ref, ref_from, stop, target, risk_c, reward_c, risk, side_bps,
+                   commission, cost_from, slip_rt, costs_on, cash):
+    """Percent of the trade notional (chunk 3.2): shares = floor(min(notional / entry, (notional x max_loss_pct
+    / 100 - 2 x commission) / (risk + round-trip slippage))), then one share less while the net max loss is over
+    the cap. A stricter legacy dollar limit or the portfolio's cash can bind too."""
+    notional, cap = lim["trade_notional_usd"], lim["max_loss_usd"]
+    limits = [{"name": "notional", "usd": notional, "per": ref, "shares": shares_for(notional, ref),
+               "how": "the %s trade notional / %s" % (money(notional), _price(ref))}]
+    if costs_on:
+        per = risk + slip_rt
+        room = cap - 2.0 * commission
+        n = int(math.floor(room / per + EPS)) if room > 0 else 0
+        how = "(%s - %s commissions) / (%s risk + %.4f round trip) a share" % (money(cap), money(2 * commission),
+                                                                             _price(risk), slip_rt)
+    else:
+        per, n = risk, shares_for(cap, risk)
+        how = "%s max loss / %s risk a share" % (money(cap), _price(risk))
+    limits.append({"name": "max loss", "usd": cap, "per": round(per, 4), "shares": max(n, 0), "how": how})
+    if lim["max_order_usd"] < notional:
+        limits.append({"name": "max order", "usd": lim["max_order_usd"], "per": ref,
+                       "shares": shares_for(lim["max_order_usd"], ref),
+                       "how": "%s / %s (max_order_usd)" % (money(lim["max_order_usd"]), _price(ref))})
+    if lim["position_cap_usd"] < notional:
+        limits.append({"name": "position cap", "usd": lim["position_cap_usd"], "per": ref,
+                       "shares": shares_for(lim["position_cap_usd"], ref),
+                       "how": "%s / %s (budget x max_position_pct)" % (money(lim["position_cap_usd"]), _price(ref))})
+    if cash is not None:
+        limits.append({"name": "cash", "usd": max(cash, 0.0), "per": ref, "shares": shares_for(max(cash, 0.0), ref),
+                       "how": "cash %s in trader/portfolio.json / %s" % (money(cash), _price(ref))})
+
+    def net_loss(q):
+        if not costs_on:
+            return round(q * risk_c / 100.0, 2)
+        return round(q * (risk + slip_rt) + (2.0 * commission if q else 0.0), 2)
+    qty = max(0, min(l["shares"] for l in limits))
+    while qty > 0 and net_loss(qty) > cap + 0.005:
+        qty -= 1
+    bound = [l["name"] for l in limits if l["shares"] == qty] or ["max loss"]
+    for l in limits:
+        l["binds"] = l["name"] == bound[0]
+    cost = round(qty * ref, 2)
+    loss_gross = round(qty * risk_c / 100.0, 2)
+    loss = net_loss(qty)
+    rt = (slip_rt + 2.0 * commission / qty) if qty else slip_rt
+    rr_net = None if reward_c is None else (reward_c / 100.0 - rt) / (risk + rt)
+    flat_by = plan.get("flat_by") or c.get("flat_by")
+    if qty == 0:
+        if bound[0] == "max loss":
+            refusal = ("one share risks %s net of costs (entry %s minus stop %s, plus the round trip), more than your "
+                       "%s max loss (%s). No order. Skip this trade, or plan a closer stop with trader-exit."
+                       % (money(net_loss(1)), _price(ref), _price(stop), money(cap),
+                          lim["from"].get("max_loss_usd", "max_loss_per_trade_usd")))
+        else:
+            refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
+                       % (sym, money(ref), bound[0], [l for l in limits if l["name"] == bound[0]][0]["how"]))
+        notes_out = []
+    else:
+        refusal, notes_out = _refusals(c, sym, ref, stop, target, risk, risk_c, reward_c, rt, rr_net, costs_on, qty,
+                                       cost, plan, flat_by)
+    out = {
+        "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
+        "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(entry_plan),
+        "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
+        "risk_per_share": risk, "reward_risk": None if reward_c is None else round(reward_c / float(risk_c), 2),
+        "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
+        "budget": None, "cash_buffer_pct": 0, "cash_buffer": 0, "cash_available": cash,
+        "max_loss_per_trade_usd": cap, "limits": limits, "qty": qty, "bound_by": bound[0],
+        "cost": cost, "max_loss": loss, "flat_by": flat_by,
+        "order_type": "limit" if ref_from == "limit" else "market", "refusal": refusal,
+        "sizing": {"trade_notional_usd": notional, "notional_usd": cost,
+                   "notional_pct": round(100.0 * cost / notional, 2), "risk_usd": loss_gross,
+                   "risk_pct": round(100.0 * loss_gross / notional, 3), "max_loss_usd": loss,
+                   "max_loss_pct": round(100.0 * loss / notional, 3), "cap_usd": cap,
+                   "cap_pct": round(100.0 * cap / notional, 3)},
+        "limits_basis": lim,
+    }
+    if costs_on:
+        out.update(costs={"per_side_bps": side_bps, "commission_usd": commission, "from": cost_from,
+                          "round_trip_slippage_per_share": round(slip_rt, 4),
+                          "round_trip_per_share": round(rt, 4)},
+                   max_loss_gross=loss_gross, reward_risk_net=None if rr_net is None else round(rr_net, 2))
+        card = plan.get("costs") if isinstance(plan.get("costs"), dict) else {}
+        if card.get("adv_usd") is not None:     # trader-risk's ADV floor reads it from the order's plan
+            out["costs"]["adv_usd"] = card["adv_usd"]
+    if reward_c is None:
+        out.update(order_class="oto", exit="close", notes=notes_out)
+    return out
+
+
 def bracket_order(s):
     """The one proposed order, Alpaca place_stock_order fields (strings) plus why and plan."""
     if s["refusal"] or s["qty"] <= 0:
@@ -501,7 +652,9 @@ def bracket_order(s):
         o["limit_price"] = _price(s["entry"])
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "day trade")
     bound = {"max loss": "%s max loss per trade" % money(s["max_loss_per_trade_usd"] or 0),
-             "position cap": "position cap", "max order": "max order", "cash": "cash after the buffer"}[s["bound_by"]]
+             "position cap": "position cap", "max order": "max order", "cash": "cash after the buffer",
+             "notional": "%s trade notional" % money((s.get("sizing") or {}).get("trade_notional_usd") or 0)
+             }[s["bound_by"]]
     if s.get("costs"):
         why = ("%s on %s: %d shares, bound by your %s (%d x (%s risk + %.4f round trip) + %s commissions = %s at "
                "the stop)" % (setup, s["symbol"], s["qty"], bound, s["qty"], _price(s["risk_per_share"]),
@@ -566,7 +719,22 @@ def plan_report(s, order, notes=()):
         lines.append("No order: " + s["refusal"])
         lines.append("Education and tooling, not financial advice.")
         return "\n".join(lines)
-    if s.get("costs"):
+    if s.get("sizing"):
+        z = s["sizing"]
+        lines.append("Size: %d shares of %s = %s at %s, %.2f%% of the %s trade notional."
+                     % (s["qty"], s["symbol"], money(z["notional_usd"]), _price(s["entry"]), z["notional_pct"],
+                        money(z["trade_notional_usd"])))
+        lines.append("Risk %s at the stop before costs (%.3f%% of the notional); max loss net of costs %s (%.3f%% of "
+                     "the notional; the cap is %s, %.3f%%)." % (money(z["risk_usd"]), z["risk_pct"],
+                                                                money(z["max_loss_usd"]), z["max_loss_pct"],
+                                                                money(z["cap_usd"]), z["cap_pct"]))
+        if s.get("costs"):
+            lines.append("Net max loss: %d x (%s + %.4f) + %s = %s." % (
+                s["qty"], _price(s["risk_per_share"]), s["costs"]["round_trip_slippage_per_share"],
+                money(2 * s["costs"]["commission_usd"]), money(s["max_loss"])))
+        for w in (s.get("limits_basis") or {}).get("warnings") or []:
+            lines.append("Note: " + w + ".")
+    elif s.get("costs"):
         lines.append("Size: %d shares of %s = %s at %s. Max loss at the stop, net of costs: %d x (%s + %.4f) + %s "
                      "= %s (%s before costs)."
                      % (s["qty"], s["symbol"], money(s["cost"]), _price(s["entry"]), s["qty"],

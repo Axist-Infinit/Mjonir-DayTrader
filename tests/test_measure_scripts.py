@@ -22,7 +22,8 @@ check = load("trader-risk", "check")
 ticket = load("trader-broker", "ticket")
 
 PLAN = os.path.join(FIX, "trader-budget", "plan-tsla.json")
-CFG = os.path.join(os.path.dirname(FIX), "..", "trader-budget", "config.example.json")
+# Mjonir chunk 3.2: these chunk 2 pins ($50 max loss, the budget) read the chunk 2 example kept as a fixture
+CFG = os.path.join(FIX, "trader-budget", "config-upstream.json")
 NOW = "2026-10-19 10:16"
 QNOW = check.parse_now("2026-10-19 10:16")
 ADV = 2.0e10                                   # TSLA clears the 100M floor: the 4 bp tier

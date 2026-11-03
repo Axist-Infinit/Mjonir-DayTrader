@@ -9,7 +9,11 @@ from _load import load, ROOT, FIX
 
 size = load("trader-budget", "size")
 
-CFG = os.path.join(ROOT, "trader-budget", "config.example.json")
+# Mjonir chunk 3.2: the example config is the percent contract (a $100,000 trade notional, no budget). These tests
+# pin upstream's budget mechanics, so they read the chunk 2 example kept as a fixture (UPSTREAM_CONTRACT below);
+# tests/test_limits.py covers the percent sizing.
+CFG = os.path.join(FIX, "trader-budget", "config-upstream.json")
+EXAMPLE = os.path.join(ROOT, "trader-budget", "config.example.json")
 PLAN = os.path.join(FIX, "trader-budget", "plan-tsla.json")
 TARGETS = os.path.join(ROOT, "trader-budget", "targets.example.json")
 TOP5 = os.path.join(FIX, "trader-budget", "berkshire-q2-2026-top5.json")
@@ -17,8 +21,8 @@ NOW = "2026-10-19 10:15"
 TODAY = "2026-10-19"
 REEL_V1 = {"AAPL": 1250, "AXP": 1119, "GOOGL": 823, "KO": 708, "BAC": 600}
 PRICES = {"AAPL": 341.27, "AXP": 309.84, "GOOGL": 353.78, "KO": 90.11, "BAC": 53.96}
-# the contract's v2 config, key for key
-CONTRACT_CFG = {
+# the contract's v2 config, key for key (Mjonir: kept as tests/fixtures/trader-budget/config-upstream.json)
+UPSTREAM_CONTRACT = {
     "budget": 5000, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_usd": 4000, "min_order_usd": 5,
     "max_loss_per_trade_usd": 50, "max_daily_loss_usd": 150, "max_trades_per_day": 3, "max_orders_per_day": 10,
     "min_reward_risk": 1.0, "require_stop": True,
@@ -30,6 +34,22 @@ CONTRACT_CFG = {
     "costs": {"slippage_tiers_bps": [[100000000, 4], [30000000, 8], [0, 15]], "commission_usd": 1.0,
               "spread_source": "snapshot", "default_half_spread_bps": 3.0, "quote_fresh_seconds": 60,
               "spread_max_frac_of_risk": 0.10, "spread_unverified": "warn"},
+}
+# Mjonir chunk 3.2: the example config ships the percent blocks (the owner: "Assume each trade is 100k. For now just
+# keep everything in percentages."); no budget, no equity figure; the legacy dollar keys stay, null (not set)
+CONTRACT_CFG = {
+    "sizing": {"trade_notional_usd": 100000, "max_loss_pct_of_notional": 1.0},
+    "limits_pct": {"daily_loss": 1.0, "weekly_loss": 2.0, "max_consecutive_losses": 3,
+                   "pause_sessions_after_streak": 1, "max_trades_per_day": 3},
+    "floors": {"min_price": 5, "min_adv_usd": 20000000, "max_chase_pct": 0.5, "no_averaging_down": True},
+    "max_loss_per_trade_usd": None, "max_daily_loss_usd": None, "max_trades_per_day": None,
+    "max_orders_per_day": 10, "min_order_usd": 5, "min_reward_risk": 1.0, "min_reward_risk_basis": "net",
+    "require_stop": True, "allow_no_target": True, "block_on_unverified": True,
+    "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
+    "fractional": False, "broker": "alpaca", "paper": True, "blocked": [],
+    "allow_options": False, "allow_margin": False, "allow_short": False, "pdt_guard": False,
+    "sec_user_agent": "Your Name you@example.com",
+    "costs": UPSTREAM_CONTRACT["costs"],
 }
 # v1's rules, for the weights mode tests
 V1 = {"budget": 5000, "cash_buffer_pct": 10, "max_position_pct": 25, "max_order_usd": 2000, "min_order_usd": 5,
@@ -88,8 +108,12 @@ class TheReel(unittest.TestCase):
     """$5,000, 10% buffer, $50 max loss, TSLA risk 5.86 -> 8 shares, $2,913.44, max loss $46.88."""
 
     def test_config_example_is_the_contract(self):
-        with open(CFG) as fh:
+        with open(EXAMPLE) as fh:
             self.assertEqual(json.load(fh), CONTRACT_CFG)
+
+    def test_the_upstream_contract_is_kept_as_a_fixture(self):
+        with open(CFG) as fh:
+            self.assertEqual(json.load(fh), UPSTREAM_CONTRACT)
 
     def test_tsla_is_8_shares_bound_by_the_max_loss(self):
         s = size.size_trade(plan(), cfg(), today=TODAY)

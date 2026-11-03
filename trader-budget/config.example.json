@@ -1,15 +1,31 @@
 {
-  "budget": 5000,
-  "cash_buffer_pct": 10,
-  "max_position_pct": 75,
-  "max_order_usd": 4000,
-  "min_order_usd": 5,
-  "max_loss_per_trade_usd": 50,
-  "max_daily_loss_usd": 150,
-  "max_trades_per_day": 3,
+  "sizing": {
+    "trade_notional_usd": 100000,
+    "max_loss_pct_of_notional": 1.0
+  },
+  "limits_pct": {
+    "daily_loss": 1.0,
+    "weekly_loss": 2.0,
+    "max_consecutive_losses": 3,
+    "pause_sessions_after_streak": 1,
+    "max_trades_per_day": 3
+  },
+  "floors": {
+    "min_price": 5,
+    "min_adv_usd": 20000000,
+    "max_chase_pct": 0.5,
+    "no_averaging_down": true
+  },
+  "max_loss_per_trade_usd": null,
+  "max_daily_loss_usd": null,
+  "max_trades_per_day": null,
   "max_orders_per_day": 10,
+  "min_order_usd": 5,
   "min_reward_risk": 1.0,
+  "min_reward_risk_basis": "net",
   "require_stop": true,
+  "allow_no_target": true,
+  "block_on_unverified": true,
   "no_entries_before": "09:45",
   "no_entries_after": "15:30",
   "flat_by": "15:55",

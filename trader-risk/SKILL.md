@@ -177,6 +177,32 @@ with a state, pass, block or unverified:
 
 Narrate the state of each check exactly as printed; an unverified check is never a pass.
 
+## Percent limits and the checks they add
+
+With a `sizing` block in the config (the example config), the loss cap is
+the max loss percent of the trade notional, the max order is the notional,
+the trades a day come from `limits_pct`, and a missing portfolio file means
+one trade notional of cash. A legacy dollar key also set is a second limit:
+the stricter applies, with a warning. New checks, each pass, block or
+unverified, in `results[].checks[]` as `{name, state, reason}`:
+
+- `price_floor`, `adv_floor` (the ADV from the plan's cost card, or from
+  Massive under `--source massive`), `chase` (the price now against the
+  trigger), `averaging_down` (a buy in a name held above the price);
+- `daily_loss` and `weekly_loss`: REALIZED from the forward record
+  (`record.py score`), plus the planned net max loss of taken trades not
+  scored yet, plus this order; no record, or one that cannot be read, is
+  unverified;
+- `loss_streak`: the last taken, scored trades all lost: blocked until the
+  pause has passed, counted in sessions on the market calendar.
+
+With `"block_on_unverified": true` (the example) any unverified check blocks
+the order, the spread included. In this mode the report lists every check
+under "every check:". `trader/state/risk.json` keeps each order's
+fingerprint and adds `basis`: `trade_notional_usd`, `limits` (the derived
+dollar knobs, with `warnings`) and `record_as_of`. Narrate those keys; do no
+arithmetic in prose.
+
 ## What it never does
 
 It never places an order, never edits an order to make it pass, never

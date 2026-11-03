@@ -68,6 +68,38 @@ What blocks an entry (on top):
 
 Every new check also lands in the result's "checks" list with its state
 (pass / block / unverified). --no-costs checks gross, as upstream did.
+
+Percent of a trade notional (Mjonir chunk 3.2; a "sizing" block in the config,
+mjonir/limits.py derive_limits): the loss check's cap is the derived max loss
+(max_loss_pct_of_notional of sizing.trade_notional_usd), the max order is the
+notional, the trades a day come from limits_pct, and with no portfolio file
+the account is one trade notional (no cash buffer, a 100% position cap,
+unless the config sets them). A legacy dollar key also set is a second limit:
+the stricter applies, with a warning. The planned-loss daily check gives way
+to the REALIZED one below. New checks, each pass, block or unverified:
+
+  price_floor     the entry under floors.min_price
+  adv_floor       the ADV$ (the plan's cost card, or Massive under --source
+                  massive) under floors.min_adv_usd; no ADV: unverified
+  chase           the price now (the limit price, a fresh trader/prices.json
+                  price, or the live ask) over the trigger x (1 +
+                  floors.max_chase_pct / 100); no fresh price: unverified
+  averaging_down  a buy in a symbol trader/portfolio.json holds above the
+                  price (floors.no_averaging_down)
+  daily_loss      the realized net dollars of today's taken trades in the
+                  forward record (record.py score) plus the planned net max
+                  loss of the taken ones not scored yet, plus this order, over
+                  limits_pct.daily_loss of the notional; no record or an
+                  unreadable one: unverified
+  weekly_loss     the same from Monday through today, limits_pct.weekly_loss
+  loss_streak     the last limits_pct.max_consecutive_losses taken and scored
+                  trades all lost net: blocked until
+                  pause_sessions_after_streak sessions have passed
+
+The order is BLOCKED by any block, and by any unverified check when
+"block_on_unverified" is true. trader/state/risk.json keeps each order's
+fingerprint and adds "basis": the trade notional, the derived limits and the
+record's as-of time.
 Exit code 0 when every order passes, 1 when any order is blocked.
 The verdicts go to trader/state/risk.json with a fingerprint of each order,
 so trader-broker only shows an order as ready if THIS exact order passed today.
@@ -154,8 +186,8 @@ def _measure(name):
         raise RiskError("the measurement layer (mjonir/%s.py) is missing at %s: %s" % (name, root, e))
 
 
-def _live_quote():
-    """--source massive: a function SYM -> the Massive NBBO {bid, ask, t_ms} or None (never 0)."""
+def _adapter():
+    """--source massive: the Mjonir data layer's adapter (quote, adv_usd), errors as RiskError."""
     root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if root not in sys.path:
         sys.path.insert(0, root)
@@ -163,7 +195,149 @@ def _live_quote():
         from mjonir import yahoo_shape
     except ImportError as e:
         raise RiskError("--source massive needs the mjonir package (Python 3.9+) at %s: %s" % (root, e))
-    return yahoo_shape.adapter(RiskError).quote
+    return yahoo_shape.adapter(RiskError)
+
+
+def _live_quote():
+    """--source massive: a function SYM -> the Massive NBBO {bid, ask, t_ms} or None (never 0)."""
+    return _adapter().quote
+
+
+# derived states of upstream's checks: (name, the prefix of its block reasons)
+UPSTREAM_CHECKS = (("format", "format:"), ("asset", "asset:"), ("short", "short:"), ("price", "price:"),
+                   ("blocked", "blocked:"), ("size", "size:"), ("cash", "cash:"), ("position", "position:"),
+                   ("stop", "stop:"), ("loss", "loss:"), ("reward_risk", "reward:risk:"), ("trades", "trades:"),
+                   ("window", "window:"), ("pdt", "pdt:"), ("duplicate", "duplicate:"),
+                   ("daily_limit", "daily limit:"), ("daily_loss_planned", "daily loss:"))
+
+
+def _ck(name, state, reason):
+    return {"name": name, "state": state, "reason": reason}
+
+
+def floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held, avg_cost, have_portfolio):
+    """price_floor, adv_floor, chase, averaging_down: each {name, state pass|block|unverified, reason}; a floor
+    that is not set is not checked."""
+    out = []
+    if fl.get("min_price") is not None:
+        mp = float(fl["min_price"])
+        if not ref:
+            out.append(_ck("price_floor", "unverified", "no price for %s to hold against the %s floor" % (sym, money(mp))))
+        elif ref < mp - 1e-9:
+            out.append(_ck("price_floor", "block", "%s at %s is under the %s price floor (floors.min_price)"
+                           % (sym, _p(ref), money(mp))))
+        else:
+            out.append(_ck("price_floor", "pass", "%s at %s, the floor is %s" % (sym, _p(ref), money(mp))))
+    if fl.get("min_adv_usd") is not None:
+        floor = float(fl["min_adv_usd"])
+        card = plan.get("costs") if isinstance(plan.get("costs"), dict) else {}
+        adv, basis = _f(card.get("adv_usd")), "the plan's cost card"
+        if adv is None and adv_fn is not None:
+            try:
+                adv, basis = _f(adv_fn(sym)), "Massive, the 20 sessions before today"
+            except Exception as e:   # noqa: could not ask is unverified, never 0
+                basis = "Massive could not answer: %s" % e
+        if adv is None:
+            out.append(_ck("adv_floor", "unverified", "no ADV$ for %s (%s): the %s floor cannot be checked"
+                           % (sym, basis if card or adv_fn else "the plan carries no cost card; --source massive asks "
+                                                               "Massive", money(floor))))
+        elif adv < floor - 0.5:
+            out.append(_ck("adv_floor", "block", "%s ADV$ %s (%s) is under the %s floor (floors.min_adv_usd)"
+                           % (sym, money(adv), basis, money(floor))))
+        else:
+            out.append(_ck("adv_floor", "pass", "%s ADV$ %s (%s), the floor is %s" % (sym, money(adv), basis,
+                                                                                    money(floor))))
+    if fl.get("max_chase_pct") is not None:
+        pct = float(fl["max_chase_pct"])
+        trig = _f(plan.get("entry"))
+        if not trig:
+            out.append(_ck("chase", "unverified", "the order's plan has no trigger price to measure a chase from"))
+        else:
+            lim = trig * (1 + pct / 100.0)
+            price, basis = now_price
+            if typ in ("limit", "stop_limit") and ref:
+                price, basis = ref, "the limit price"
+            if price is None:
+                out.append(_ck("chase", "unverified", "no fresh price for %s (%s) to hold against the trigger %s "
+                                                      "(the limit is %s, %g%% over)" % (sym, basis, _p(trig), _p(lim),
+                                                                                       pct)))
+            elif price > lim + 1e-9:
+                out.append(_ck("chase", "block", "%s at %s (%s) is %.2f%% over the trigger %s, past the %g%% chase "
+                                                 "limit (%s)" % (sym, _p(price), basis, 100.0 * (price / trig - 1),
+                                                                 _p(trig), pct, _p(lim))))
+            else:
+                out.append(_ck("chase", "pass", "%s at %s (%s), the trigger %s, the limit %s" % (
+                    sym, _p(price), basis, _p(trig), _p(lim))))
+    if fl.get("no_averaging_down"):
+        if held <= 1e-9:
+            out.append(_ck("averaging_down", "pass", "no %s position on record%s" % (
+                sym, "" if have_portfolio else " (no trader/portfolio.json)")))
+        elif avg_cost is None:
+            out.append(_ck("averaging_down", "unverified", "%s is held but its cost basis is not in the portfolio"
+                           % sym))
+        else:
+            price = now_price[0] if now_price[0] is not None else ref
+            if price is None:
+                out.append(_ck("averaging_down", "unverified", "%s is held at %s a share and there is no price to "
+                                                               "compare" % (sym, _p(avg_cost))))
+            elif price < avg_cost - 0.005:
+                out.append(_ck("averaging_down", "block", "%s is held at %s a share and trades at %s: a buy now "
+                                                          "averages down" % (sym, _p(avg_cost), _p(price))))
+            else:
+                out.append(_ck("averaging_down", "pass", "%s is held at %s a share, at or under %s: not at a loss"
+                               % (sym, _p(avg_cost), _p(price))))
+    return out
+
+
+def record_checks(book, book_err, lim, today, max_loss, batch_loss):
+    """daily_loss and weekly_loss (REALIZED from the forward record) and loss_streak, in the percent mode."""
+    ledger = _measure("ledger")
+    out = []
+    why = book_err or (None if book["exists"] else "no record at %s yet (entry.py --record writes it on a trigger)"
+                       % book["triggers_path"])
+    d = datetime.date.fromisoformat(today)
+    monday = (d - datetime.timedelta(days=d.weekday())).isoformat()
+    for name, start, cap, pct in (("daily_loss", today, lim["daily_loss_usd"], lim.get("daily_loss_pct")),
+                                  ("weekly_loss", monday, lim["weekly_loss_usd"], lim.get("weekly_loss_pct"))):
+        if why:
+            out.append(_ck(name, "unverified", "the realized loss cannot be read: %s" % why))
+            continue
+        if max_loss is None:
+            out.append(_ck(name, "unverified", "this order has no max loss to add (no stop or no price)"))
+            continue
+        r = ledger.realized(book, start, today)
+        if r["unknown"]:
+            out.append(_ck(name, "unverified", "%d taken trade(s) without a number: %s" % (
+                len(r["unknown"]), "; ".join(r["unknown"]))))
+            continue
+        lost = max(0.0, -r["realized_usd"])
+        signed = ("-" if r["realized_usd"] < 0 else "") + money(abs(r["realized_usd"]))
+        used = lost + r["open_usd"] + batch_loss
+        words = ("realized %s net over %d scored trade(s) since %s, %s planned on %d open trade(s), %s passed earlier "
+                 "in this batch, plus %s for this one = %s; the limit is %s (%s%% of the notional)"
+                 % (signed, r["scored"], start, money(r["open_usd"]), r["open"], money(batch_loss),
+                    money(max_loss), money(used + max_loss), money(cap), _pct(pct if pct is not None else 0)))
+        out.append(_ck(name, "block" if used + max_loss > cap + CENT else "pass", words))
+    n, pause = lim.get("max_consecutive_losses"), lim.get("pause_sessions_after_streak") or 0
+    if n:
+        if why:
+            out.append(_ck("loss_streak", "unverified", "the streak cannot be read: %s" % why))
+        else:
+            last = ledger.loss_streak(book, n)
+            if last is None:
+                out.append(_ck("loss_streak", "pass", "no %d taken trades in a row lost" % n))
+            else:
+                passed = sum(1 for i in range(1, 400)
+                             if datetime.date.fromisoformat(last) + datetime.timedelta(days=i) <= d
+                             and trading_day(datetime.date.fromisoformat(last) + datetime.timedelta(days=i))[0])
+                if passed <= pause:
+                    out.append(_ck("loss_streak", "block", "the last %d taken trades lost, the last on %s: paused for "
+                                                           "%d session(s) after it (%d passed)" % (n, last, pause,
+                                                                                                   passed)))
+                else:
+                    out.append(_ck("loss_streak", "pass", "the last %d taken trades lost (the last on %s); the %d-session "
+                                                          "pause is over" % (n, last, pause)))
+    return out
 
 
 def no_target_check(plan, oc, c):
@@ -384,6 +558,19 @@ def _p(x):
     return "%.2f" % float(x)
 
 
+def cost_basis(portfolio):
+    """{SYM: average cost a share} from the portfolio's lots (None for a holding without lots)."""
+    out = {}
+    for p in (portfolio or {}).get("positions", []):
+        t = str(p.get("ticker") or p.get("symbol") or "").upper()
+        lots = p.get("lots") or []
+        n = sum(_f(l.get("shares")) or 0 for l in lots)
+        cost = sum(_f(l.get("cost")) or 0 for l in lots)
+        if t:
+            out[t] = (cost / n) if n > 0 else (_f(p.get("avg_cost")) or None)
+    return out
+
+
 def account(cfg, portfolio, prices):
     """Starting account: cash and position values. No portfolio = a fresh
     account funded with the budget."""
@@ -460,15 +647,37 @@ def day_trades(state, today):
 # ---------------------------------------------------------------- the check
 
 def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None,
-          no_costs=False, quote_fn=None):
+          no_costs=False, quote_fn=None, record_dir=None, adv_fn=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
 
     now          naive UTC (default: the real clock); its New York date is "today"
     price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh
     no_costs     gross only (upstream's loss and reward:risk; no spread check)
-    quote_fn     SYM -> {bid, ask, t_ms} or None: the live NBBO for the spread check"""
+    quote_fn     SYM -> {bid, ask, t_ms} or None: the live NBBO for the spread and chase checks
+    record_dir   the forward record (default ${TRADER_RECORD_DIR:-record}) for the realized loss checks
+    adv_fn       SYM -> ADV$ (Massive) for the ADV floor when the plan's cost card has none"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
+    lm = _measure("limits")
+    try:
+        lim = lm.derive_limits(cfg or {})
+    except lm.LimitsError as e:
+        raise RiskError("config: %s" % e)
+    pct_mode = lim["mode"] == "notional"
+    if pct_mode:   # the percent blocks decide: upstream's dollar defaults never apply
+        raw = cfg or {}
+        c.update(max_loss_per_trade_usd=lim["max_loss_usd"], max_daily_loss_usd=None,
+                 max_trades_per_day=lim["max_trades_per_day"], max_order_usd=lim["max_order_usd"],
+                 budget=_f(raw.get("budget")) or lim["trade_notional_usd"],
+                 cash_buffer_pct=raw.get("cash_buffer_pct") or 0, max_position_pct=raw.get("max_position_pct") or 100)
+    fl = lim["floors"]
+    book, book_err = None, None
+    if pct_mode:
+        ledger = _measure("ledger")
+        try:
+            book = ledger.load(record_dir)
+        except ledger.RecordError as e:
+            book_err = "the record is unreadable: %s" % e
     costs = _measure("costs")
     try:
         cost_settings = costs.settings(c)
@@ -482,6 +691,9 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
     now_et = to_eastern(now_utc)
     today = today or now_et.date().isoformat()
     acct, top_warn = account(c, portfolio, prices)
+    top_warn.extend(lim["warnings"])
+    held0 = dict(acct["shares"])
+    basis0 = cost_basis(portfolio)
     blocked = {str(b).upper() for b in c.get("blocked") or []}
     done_today = placed_today(state, today)
     count_today = len(done_today)
@@ -756,7 +968,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                         if sp["state"] == "block":
                             later.append("spread: " + sp["reason"])
                         elif sp["state"] == "unverified":
-                            if cost_settings["spread_unverified"] == "block":
+                            if cost_settings["spread_unverified"] == "block" or c.get("block_on_unverified"):
                                 later.append("spread: unverified, " + sp["reason"])
                             else:
                                 warns.append("spread unverified: " + sp["reason"])
@@ -776,6 +988,27 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 later.append("pdt: %d day trades in the last 5 business days (%s); a 4th trips the "
                              "pattern-day-trader rule your broker applies (\"pdt_guard\": true)"
                              % (pdt_n, ", ".join(pdt_list)))
+            if side == "buy" and (pct_mode or any(v is not None and v is not False for v in fl.values())):
+                now_price = (live, "a fresh price in trader/prices.json") if live else (
+                    None, "no trader/prices.json price under %d minutes old%s" % (
+                        FRESH_MINUTES, ", no live quote" if quote_fn is not None else "; --source massive asks the "
+                                                                                       "live ask"))
+                if live is None and quote_fn is not None:
+                    nbbo = quote_fn(sym)
+                    if nbbo and nbbo.get("ask") and nbbo.get("t_ms") and \
+                            abs((now_utc - datetime.datetime(1970, 1, 1)).total_seconds() * 1000 - nbbo["t_ms"]) <= 60000:
+                        now_price = (float(nbbo["ask"]), "the live ask")
+                new = floor_checks(fl, sym, ref, typ, plan, now_price, adv_fn, held0.get(sym, 0.0), basis0.get(sym),
+                                   portfolio is not None)
+                if pct_mode:
+                    new += record_checks(book, book_err, lim, today, max_loss, batch_loss)
+                for ck in new:
+                    checks.append(ck)
+                    if ck["state"] == "block":
+                        later.append("%s: %s" % (ck["name"].replace("_", " "), ck["reason"]))
+                    elif ck["state"] == "unverified":
+                        (later if c.get("block_on_unverified") else warns).append(
+                            "unverified: %s: %s" % (ck["name"].replace("_", " "), ck["reason"]))
             if stop and ref and risk_ps:
                 info.append("entry %s (%s), stop %s, target %s: risk %s a share"
                             % (_p(ref), REF_WORDS.get(ref_from, ref_from), _p(stop),
@@ -795,7 +1028,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                    if _f(c.get("max_loss_per_trade_usd")) else "",
                                    ("%.2f" % rr) if rr is not None else "n/a",
                                    (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
-            if daily or cap_t:
+            if pct_mode and cap_t:
+                info.append("today before this: %d of %d trades; the loss limits are percent of the %s trade "
+                            "notional, realized from the forward record" % (len(entries_today) + batch_entries, cap_t,
+                                                                            money(lim["trade_notional_usd"])))
+            elif daily or cap_t:
                 info.append("today before this: %d of %s trades, %s of %s daily loss"
                             % (len(entries_today) + batch_entries, cap_t or "unlimited",
                                money(loss_today + batch_loss), money(daily) if daily else "no limit on"))
@@ -819,6 +1056,15 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             warns.extend("exit, not blocked: " + x for x in later)
 
         verdict = "BLOCK" if reasons else "PASS"
+        if pct_mode:
+            named = set(ck["name"] for ck in checks)
+            for name, prefix in UPSTREAM_CHECKS:
+                if name in named or (name == "reward_risk" and "target" in named) or name == "daily_loss_planned":
+                    continue    # the planned daily loss gives way to the realized daily_loss in this mode
+                hit = [x for x in reasons if x.startswith(prefix)]
+                off = name == "pdt" and not c.get("pdt_guard")
+                checks.append(_ck(name, "block" if hit else "pass", "; ".join(hit) if hit else
+                                  "off (pdt_guard is false)" if off else "not blocked"))
         if verdict == "PASS":
             if kind == "entry" and side in ("buy", "sell"):
                 batch_entries += 1
@@ -852,6 +1098,9 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         })
 
     return {
+        "basis": {"trade_notional_usd": lim["trade_notional_usd"], "limits": lim,
+                  "record_as_of": (book or {}).get("as_of"), "record_dir": (book or {}).get("dir"),
+                  "record_error": book_err},
         "date": today,
         "now_new_york": now_et.strftime("%Y-%m-%d %H:%M"),
         "paper": bool(c.get("paper", True)),
@@ -881,6 +1130,7 @@ def report(res):
         lines.append("WARNING: " + w)
     if res["warnings"]:
         lines.append("")
+    pct_mode = ((res.get("basis") or {}).get("limits") or {}).get("mode") == "notional"
     for r in res["results"]:
         lines.append("%-5s #%d %s %s %s, %s" % (r["verdict"], r["index"], r["side"], r["symbol"], r["amount"],
                                                 r["kind"]))
@@ -890,6 +1140,10 @@ def report(res):
             lines.append("        - " + x)
         for x in r["warnings"]:
             lines.append("        ~ " + x)
+        if pct_mode and r.get("checks"):
+            lines.append("        every check:")
+            for ck in r["checks"]:
+                lines.append("          %-19s %-10s %s" % (ck["name"], ck["state"], ck.get("reason") or ""))
     lines.append("")
     lines.append("%d passed, %d blocked at %s New York. Cash after the passed orders: %s (%s account)."
                  % (res["pass"], res["block"], res["now_new_york"], money(res["cash_after"]),
@@ -940,6 +1194,8 @@ def main(argv=None):
     ap.add_argument("--no-costs", action="store_true", help="gross only: upstream's loss and reward:risk")
     ap.add_argument("--source", choices=["yahoo", "massive"], help="massive: the live NBBO for the spread check "
                                                                    "(or export TRADER_SOURCE=massive)")
+    ap.add_argument("--record-dir", help="the forward record for the realized loss checks "
+                                         "(default ${TRADER_RECORD_DIR:-record})")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -955,9 +1211,15 @@ def main(argv=None):
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
-        quote_fn = _live_quote() if (a.source or os.environ.get("TRADER_SOURCE")) == "massive" else None
+        massive = (a.source or os.environ.get("TRADER_SOURCE")) == "massive"
+        quote_fn = _live_quote() if massive else None
+        adv_fn = None
+        if massive:
+            ad = _adapter()
+            day = a.today or to_eastern(now).date().isoformat()
+            adv_fn = lambda sym: ad.adv_usd(sym, day)    # noqa: E731
         res = check(orders, cfg, portfolio, prices, state, a.today, now, times, no_costs=a.no_costs,
-                    quote_fn=quote_fn)
+                    quote_fn=quote_fn, record_dir=a.record_dir, adv_fn=adv_fn)
         if pdoc.get("as_of"):
             res["prices_as_of"] = pdoc["as_of"]
         if not a.no_write:

@@ -11,7 +11,9 @@ from _load import load, ROOT, FIX
 check = load("trader-risk", "check")
 ticket = load("trader-broker", "ticket")
 
-CFG_PATH = os.path.join(ROOT, "trader-budget", "config.example.json")
+# Mjonir chunk 3.2: the example config is the percent contract; these tests pin upstream's dollar limits, so they
+# read the chunk 2 example kept as a fixture. tests/test_limits.py covers the percent limits and the new checks.
+CFG_PATH = os.path.join(FIX, "trader-budget", "config-upstream.json")
 TSLA_PATH = os.path.join(FIX, "trader-risk", "orders-tsla.json")
 V1_ORDERS_PATH = os.path.join(FIX, "trader-risk", "orders-reel.json")
 NOW = "2026-10-19 10:15"

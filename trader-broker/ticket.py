@@ -430,9 +430,11 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
     cost-basis lot per buy (oldest lots are relieved first on a sell)."""
     pf = read_json(portfolio_path, "portfolio", required=False)
     if pf is None:
-        budget = cfg.get("budget")
+        # a percent config (Mjonir chunk 3.2) has no budget: the paper account starts at one trade notional
+        budget = cfg.get("budget") or (cfg.get("sizing") or {}).get("trade_notional_usd")
         if not budget:
-            raise TicketError("no %s yet and no budget in the config to start it from" % portfolio_path)
+            raise TicketError("no %s yet and no budget (or sizing.trade_notional_usd) in the config to start it from"
+                              % portfolio_path)
         pf = {"cash": float(budget), "positions": []}
     symbol = symbol.upper()
     qty, price = float(qty), float(price)

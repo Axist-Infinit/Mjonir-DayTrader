@@ -49,8 +49,13 @@ another day is refused: make a new one with trader-exit.
 
 ## Step 1: set the rules once
 
+`config.example.json` is the percent config (the next section): each trade
+is sized against one trade notional, and every limit is a percent of it. A
+config with no `sizing` block keeps the budget rules below, as upstream.
+
 If `trader/config.json` does not exist, copy `config.example.json` into
-`trader/config.json` and ask the user for each value in plain words:
+`trader/config.json`. For a budget config, ask the user for each value in
+plain words:
 
 - **budget**: how much money this is for. Only money they can afford to lose.
 - **cash_buffer_pct**: how much always stays in cash (default 10).
@@ -62,6 +67,31 @@ If `trader/config.json` does not exist, copy `config.example.json` into
   ("09:45" / "15:30") and **flat_by** ("15:55"), all New York time.
 - **blocked**: tickers they never want to trade.
 - Keep **paper** true until they have watched it work on a paper account.
+
+## Percent of a trade notional (the example config)
+
+The owner's rule: each trade is one fixed notional, and everything is a
+percent of it; no equity figure is stored. The `sizing` block holds the
+trade notional and the max loss as a percent of it; `limits_pct` holds the
+day and week loss percents, the trade count and the losing-streak pause
+(trader-risk enforces those); `floors` holds the price, ADV, chase and
+averaging-down floors (trader-risk again). The size is
+
+    shares = floor(min(notional / entry,
+                       (notional x max loss % / 100 - 2 x commission)
+                       / (risk + round-trip slippage)))
+
+then one share less while the net max loss is still over the cap. A legacy
+dollar key also in the config (`max_loss_per_trade_usd`, `max_order_usd`, a
+`budget`) is a second limit: the stricter one applies and the report says
+so. In the example the legacy keys are null, which means not set.
+
+From `--json`, narrate these keys and compute nothing yourself: `qty`,
+`sizing.notional_usd`
+and `sizing.notional_pct` (the order's dollars and its percent of the trade
+notional), `sizing.risk_usd` and `sizing.risk_pct` (the loss at the stop
+before costs), `sizing.max_loss_usd` and `sizing.max_loss_pct` (net of
+costs), `sizing.cap_usd`, `bound_by`, and `limits_basis.warnings`.
 
 ## Step 2: size the trade
 
