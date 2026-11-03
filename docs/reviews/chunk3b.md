@@ -243,3 +243,27 @@ Section 10 as pasted (D2, `66babe0`; the monthly table of 68 walks follows the l
 - **Holdout counts-only** runs without `--i-have-read-the-prereg` (it reads no outcome); it builds the
   development window's last 14 first bars when they are not in the store (inputs, never outcomes).
 - **Not checked by the runner:** the owner's word in the holdout review's header (the lead writes it).
+
+## 7. Review fixes (3b review: APPROVE WITH SHOULDs, no MUST)
+
+Two commits on `feat/c3b-rvol`: `58bc153` (the code, 625 OK, 17.1 s) and `0b9adcb` (D3, every prereg text item, 625
+OK, 17.3 s). The owner kept criterion 4; the entry rule was not decided at the time, so neither commit touched the
+PRIMARY entry, the 4.1 table or the paper's ATR and RVOL floors. Status still DRAFT; counts-only not re-run.
+
+| item | change | pinned by |
+| --- | --- | --- |
+| S1 freeze re-pointing | a sixth check, `freeze commit`: the named commit reads `Status: FROZEN (commit pending)`, its parent `Status: DRAFT (awaiting the owner's freeze)`, and no earlier version reads FROZEN (the last clause is mine: it also refuses a return to DRAFT followed by a second freeze); section 1 says so (D3) | test_rvol_study `Freeze.test_a_retune_repointed_at_a_later_pending_commit_is_refused` (C3 pending after F2 plus C4 pointing at it: refused, "parent"; a re-DRAFT then re-freeze: refused, "frozen before"; a status naming D0: refused; the honest D0, F1, F2 path passes) |
+| S2 self-check | reads the document's own status line: DRAFT or pending, Refused "status"; FROZEN (commit h), returns h | `Freeze.test_this_documents_own_status_gives_the_matching_outcome` |
+| S3 section 12 text | counts-only "writes only counts, the two reference caches and the first-bar store (ticker, open, close, volume per session: inputs the scoring run reuses; no direction, no outcome)" (D3) | the document |
+| S4 holdout criteria | `holdout_check` reads `criteria_counted` from the frozen text and requires pass on those keys; the sidecar's own list is ignored | `Freeze.test_the_holdout_refusals` (a sidecar that counts 1 to 3 with 4 unverified is refused while the text counts 4; accepted once the text strikes 4) |
+| S5 holdout --out | `holdout_out_check`: a holdout `--out` must be `docs/reviews/rvol_holdout_*.md`, refused otherwise before any data | `Freeze.test_the_holdout_refusals` (three bad paths, the good one, `main` refused with "check holdout out") |
+| S6 resume | each session file's head and end rows carry `stamp` {runner_commit, code_sha256 over PARAMS, tools/rvol_study.py and mjonir/rvol.py}; `read_day` returns None (score again) on any mismatch | `Pieces.test_a_session_scored_with_other_code_is_scored_again` |
+| N1 section 4.5 | the at-most-eight `nextafter` steps sentence (D3) | `Pieces.test_the_risk_floor_widens_and_keeps_its_controls` (the code it describes) |
+| N2 counts-only computes nothing per name | `bar_stage(rows=False)` returns names only; the runner's `funnel(rows=False)` in counts-only | test_scanner_rvol `Rules.test_rows_false_counts_the_same_and_computes_nothing_per_name`; `Window.test_counts_only_writes_counts_and_nothing_else` (every `bar_stage` call in counts-only had rows=False) |
+| N3 section 6.1 | eligible control bars, `last` and every index are positions in the present-bucket list (D3) | the document |
+| N4 section 9 | the record takes a fire only from a live scan made by 09:45 ET; a `--date` replay never records (D3) | test_scanner_rvol `Cli.test_a_late_live_scan_records_nothing`, `Cli.test_a_replay_has_no_stage_one_and_records_nothing` |
+| N5 templates | `mjonir.stats.verdict_years` and `sign_flip_note` with fixed templates `Y_NONE`, `Y_ABOVE`, `Y_BELOW`, `Y_FLIP` (in `all_templates`, so the banned-words test covers them); the runner uses both | test_mjonir_stats `Years` (three states, a year under the floor not read, the note's text) and `Verdicts.test_banned_words` |
+| N6 replay cost | `scan.py rvol` prints the stage-2 request count before stage 2 (stderr, so `--json` stays clean; silenced by `--quiet` only); `--shortlist N` on a `--date` replay ranks stage 1 by the day's whole-session volume over the mean (labelled a replay-only proxy; the floors still read only the sessions before the day) | `Rules.test_a_replay_shortlist_reads_the_days_volume_for_stage_one_only`, `Cli.test_a_replay_has_no_stage_one_and_records_nothing` |
+| N7 no snapshot | stage 1 counts `no_snapshot` (no row) and `zero_volume` | `Rules.test_names_with_no_snapshot_row_are_counted` |
+| criterion 3 text | section 8.1: unverified (`no_year_at_floor`) when no year reaches 40 fires, never pass (D3) | `Years.test_the_year_criterion_has_three_states` |
+| SPY 13:00:00 reading | section 4.2: one sentence (D3) | `Pieces.test_the_store_and_the_spy_count` |
