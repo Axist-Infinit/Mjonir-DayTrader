@@ -1,10 +1,13 @@
 """mjonir.outcomes: the one place outcomes are computed (chunk 2, step 2.3). Gap-through fills, the
 early close scored to bar 41, both-touched, no target, the touch margins and fragile decisions."""
 
+import os
+import re
 import unittest
 
 import _mj  # noqa: F401  (sys.path, throwaway data dirs)
 import synth
+from _load import ROOT
 from mjonir import outcomes as O
 
 
@@ -110,6 +113,21 @@ class Score(unittest.TestCase):
             O.score_trade([FLAT, FLAT], 0, 100, 98, 102, 1, gap_fill="worst")
         r = O.score_trade([FLAT], 0, 100.0, 98.0, 102.0, 0)            # entered on the last bar
         self.assertEqual((r["outcome"], r["gross_r"]), ("close", 0.0))
+
+
+class OnePlace(unittest.TestCase):
+    def test_no_other_outcome_comparison(self):
+        # the review's grep: nothing compares a price with the stop or the target outside outcomes.py
+        pat = re.compile(r">= target|<= stop|>= tgt|<= stp")
+        hits = []
+        for folder in [d for d in os.listdir(ROOT) if d.startswith("trader-")] + ["mjonir"]:
+            for f in os.listdir(os.path.join(ROOT, folder)):
+                if f.endswith(".py") and not (folder == "mjonir" and f == "outcomes.py"):
+                    with open(os.path.join(ROOT, folder, f), encoding="utf-8") as fh:
+                        for n, line in enumerate(fh, 1):
+                            if pat.search(line):
+                                hits.append("%s/%s:%d" % (folder, f, n))
+        self.assertEqual(hits, [])
 
 
 if __name__ == "__main__":

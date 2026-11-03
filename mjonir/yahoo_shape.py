@@ -652,6 +652,42 @@ def fetch_history_doc(client, cal, symbol, start, end, source="auto", clock=None
             cache.close()
 
 
+def fetch_history_bars(client, cal, symbol, start, end, source="auto", cache=_AUTO):
+    """The time machine's history (chunk 2): ``bars.bars_5m`` (ONE store: Kalex, the API or its cache, or
+    the flat files; complete bars by the real clock, regular hours) as a v8 history document whose
+    ``meta.mjonir`` carries that call's own ``info``: ``store`` (api, cache, kalex, flatfile), ``adjusted``
+    and ``as_of``. ``source`` stays massive, kalex or flatfile (the chunk 1 label)."""
+    from . import bars as B
+    cal = _cal(cal)
+    info = {}
+    rows = B.bars_5m(symbol, start, end, rth_only=True, client=client, cal=cal, source=source, cache=cache,
+                     info=info)
+    dicts = [{"t": t, "o": o, "h": h, "l": l, "c": c, "v": v} for (t, o, h, l, c, v) in rows]
+    store = info.get("source")
+    doc = history_doc(symbol, dicts, cal, start, end, now=K.now_et(),
+                      source="massive" if store in ("api", "cache") else store, adjusted=info.get("adjusted"))
+    doc["chart"]["result"][0]["meta"]["mjonir"].update(store=store, as_of=info.get("as_of"))
+    return doc
+
+
+def fetch_adv_usd(client, cal, symbol, asof, n=20):
+    """The cost layer's ADV$ (bars.adv_usd): the n sessions strictly before asof."""
+    from . import bars as B
+    return B.adv_usd(symbol, asof, n, client=client, cal=cal)
+
+
+def fetch_quote(client, symbol):
+    """The NBBO {bid, ask, t_ms} (bars.quote), or None when it could not be asked."""
+    from . import bars as B
+    return B.quote(symbol, client=client)
+
+
+def fetch_daily_rows(client, cal, symbol, start, end):
+    """Adjusted daily bars of complete sessions (bars.daily) as (t_ms, o, h, l, c, v)."""
+    from . import bars as B
+    return B.daily(symbol, start, end, client=client, cal=cal)
+
+
 def fetch_quote_docs(client, cal, symbols, clock=None):
     """({SYM: range=1d v8 doc}, {SYM: error}) from ONE snapshot request per 200 tickers. Before the
     open the previous close needs the session before it: one daily request per ticker then."""
@@ -727,7 +763,7 @@ class Adapter(object):
 
     def history_text(self, symbol, date, sessions=60, years=None, now=None):
         """timemachine.py: `sessions` sessions ending on the plan's date (60 = Yahoo's 60d), or every
-        session of the `years` years before it."""
+        session of the `years` years before it, through bars.bars_5m (fetch_history_bars)."""
         g = globals()
         cal = self._run(K.Calendar.load)
         end = self._run(K.as_date, date)
@@ -735,7 +771,25 @@ class Adapter(object):
             start = end - _dt.timedelta(days=int(round(365.25 * float(years))))
         else:
             start = self._run(cal.sessions_back, end, int(sessions))[0]
-        return to_text(self._run(g["fetch_history_doc"], None, cal, symbol, start, end, "auto"))
+        return to_text(self._run(g["fetch_history_bars"], None, cal, symbol, start, end, "auto"))
+
+    def adv_usd(self, symbol, asof, n=20):
+        """The cost layer's ADV$: mean close x volume over the n sessions strictly before asof."""
+        g = globals()
+        return self._run(g["fetch_adv_usd"], None, None, symbol, asof, n)
+
+    def quote(self, symbol):
+        """The NBBO {bid, ask, t_ms}, or None when it could not be asked (never 0)."""
+        g = globals()
+        try:
+            return g["fetch_quote"](None, symbol)
+        except ERRORS:
+            return None
+
+    def daily_rows(self, symbol, start, end):
+        """Adjusted daily bars [(t_ms, o, h, l, c, v)] of complete sessions (trader-exit's datr stop)."""
+        g = globals()
+        return self._run(g["fetch_daily_rows"], None, None, symbol, start, end)
 
     def quote_texts(self, symbols):
         """alerts.py / news.py: {SYM: v8 text} from one snapshot request; a missing ticker is absent."""

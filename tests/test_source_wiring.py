@@ -44,7 +44,7 @@ class Wired(unittest.TestCase):
     """Each test patches the fetchers it needs; tearDown puts every one back."""
 
     NAMES = ("fetch_chart_doc", "fetch_charts_bulk", "fetch_daily_bundle", "fetch_history_doc", "fetch_quote_docs",
-             "fetch_news")
+             "fetch_news", "fetch_history_bars", "fetch_adv_usd", "fetch_quote", "fetch_daily_rows")
 
     def setUp(self):
         self.saved = {n: getattr(Y, n) for n in self.NAMES}
@@ -174,14 +174,24 @@ class Exit(Wired):
 class TimeMachine(Wired):
     def test_run(self):
         tm = load("trader-timemachine", "timemachine")
-        self.serve("fetch_history_doc", lambda *a, **kw: doc_of(TM60))
-        args = ["run", "--plan", PLAN, "--now", "2026-10-19 10:15", "--replays", "500", "--json"]
+        # chunk 2: the history comes through bars.bars_5m (fetch_history_bars); costs are compared below
+        self.serve("fetch_history_bars", lambda *a, **kw: doc_of(TM60))
+        args = ["run", "--plan", PLAN, "--now", "2026-10-19 10:15", "--replays", "500", "--json", "--no-costs"]
         c1, off, _ = run(tm, args + ["--offline", TM60])
         c2, mas, err = run(tm, args + ["--source", "massive"])
         self.assertEqual((c1, c2), (0, 0), err)
         a, b = json.loads(off), json.loads(mas)
         self.assertEqual((a.pop("source"), b.pop("source")), ("offline", "massive"))
         self.assertEqual(a, b)
+        self.assertEqual(b["data"]["source"], "yahoo")                # the served document is Yahoo's own
+        self.assertEqual([c[0] for c in self.calls], ["fetch_history_bars"])     # --no-costs: no ADV asked
+        # costs on: ADV$ from Massive picks the 4 bp tier
+        self.serve("fetch_adv_usd", 2.0e10)
+        c3, net, err = run(tm, args[:-1] + ["--source", "massive"])
+        self.assertEqual(c3, 0, err)
+        card = json.loads(net)["costs"]["card"]
+        self.assertEqual((card["slippage_bps"], card["adv_usd"]), (4.0, 20000000000))
+        self.assertEqual(self.calls[-1][0], "fetch_adv_usd")
         self.assertEqual(b["mc"]["pool_sessions"], 59)
         self.assertEqual(b["data"]["range"], "60d")                  # read from meta.range
         name, args_, kw = self.calls[0]
@@ -189,7 +199,8 @@ class TimeMachine(Wired):
                          ("TSLA", "2026-07-27", "2026-10-19", "auto"))      # 60 sessions ending on the plan day
         run(tm, ["run", "--plan", PLAN, "--now", "2026-10-19 10:15", "--replays", "10", "--json", "--source",
                  "massive", "--years", "1"])
-        self.assertEqual(self.calls[-1][1][3].isoformat(), "2025-10-19")
+        hist = [c for c in self.calls if c[0] == "fetch_history_bars"]
+        self.assertEqual(hist[-1][1][3].isoformat(), "2025-10-19")
 
     def test_the_source_is_the_documents_own(self):
         tm = load("trader-timemachine", "timemachine")
@@ -198,10 +209,12 @@ class TimeMachine(Wired):
             d = doc_of(TM60)
             d["chart"]["result"][0]["meta"]["mjonir"] = {"source": "kalex", "adjusted": True}
             return d
-        self.serve("fetch_history_doc", from_kalex)
+        self.serve("fetch_history_bars", from_kalex)
+        self.serve("fetch_adv_usd", 2.0e10)
         code, out, err = run(tm, ["run", "--plan", PLAN, "--now", "2026-10-19 10:15", "--replays", "10", "--json",
                                   "--source", "massive"])
         self.assertEqual((code, json.loads(out)["source"]), (0, "kalex"), err)
+        self.assertEqual(json.loads(out)["data"]["source"], "kalex")
 
 
 class Alerts(Wired):

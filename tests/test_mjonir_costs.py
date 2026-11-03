@@ -91,8 +91,13 @@ class Arithmetic(unittest.TestCase):
     def test_model_and_trade_cost(self):
         card = C.cost_card(364.18, 358.32, 370.04, 8, adv_usd=2.0e10)
         m = C.model_of(card)
-        self.assertEqual(m, {"per_side_bps": 7.0, "commission_usd": 1.0, "shares": 8})
+        self.assertEqual(m, {"per_side_bps": 7.0, "commission_usd": 1.0, "shares": 8, "max_loss_usd": None})
         self.assertAlmostEqual(C.trade_cost_r(364.18, 5.86, m), card["cost_r"], places=5)
+        # sized by the max loss: a trade with half the risk carries twice the shares, half the commission a share
+        sized = C.model_of(C.cost_card(364.18, 358.32, 370.04, 8, adv_usd=2.0e10, max_loss_usd=50))
+        self.assertAlmostEqual(C.trade_cost_r(364.18, 5.86, sized), card["cost_r"], places=5)
+        half = C.trade_cost_r(364.18, 2.93, sized)
+        self.assertAlmostEqual(half, (2 * 364.18 * 7 / 1e4 + 2 * 1.0 / 17) / 2.93)
 
     def test_shares_basis(self):
         self.assertEqual(C.shares_basis(5.86)[0], 8)            # floor(50 / 5.86)

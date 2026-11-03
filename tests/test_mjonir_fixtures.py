@@ -5,6 +5,7 @@ import os
 import re
 import unittest
 
+import _load
 import _mj
 from mjonir import config as C
 
@@ -35,7 +36,11 @@ class NoKeys(unittest.TestCase):
         self.assertEqual(key_like("a1b2c3d4e5f6a7b8c9d0e1f2 BBG000C2V3D6 dbe378bac57c97e81b427f3232696f78"), [])
 
     def test_not_the_configured_key(self):
-        key = C.api_key()
+        # tests/_load.py hides the key from every test; this one compares against what it hid
+        root = _load.HIDDEN.get("INFINIT_ROOT") or C.DEFAULT_INFINIT_ROOT
+        layers = C._parse_env_file(os.path.join(root, ".env"))
+        layers.update({k: v for k, v in _load.HIDDEN.items() if v and k != "INFINIT_ROOT"})
+        key = C.api_key(layers)
         if not key:
             self.skipTest("no key configured on this machine")
         for p in self.files():

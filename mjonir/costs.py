@@ -182,25 +182,30 @@ def shares_basis(risk, max_loss_usd=None):
 
 def model_of(card):
     """The per-trade cost model a cost card implies (what a history or control trade is charged):
-    {per_side_bps, commission_usd, shares}; None when costs are off."""
+    {per_side_bps, commission_usd, shares, max_loss_usd}; None when costs are off. With max_loss_usd each
+    trade's commission is spread over its own floor(max loss / risk) shares, the way trader-budget sizes
+    it; without, over the card's shares."""
     if not card or card.get("off"):
         return None
-    return {"per_side_bps": card["per_side_bps"], "commission_usd": card["commission_usd"], "shares": card["shares"]}
+    return {"per_side_bps": card["per_side_bps"], "commission_usd": card["commission_usd"], "shares": card["shares"],
+            "max_loss_usd": card.get("max_loss_usd")}
 
 
 def trade_cost_r(entry, risk, model):
     """cost_r of one trade at this entry and risk under a model (0 when the model is None)."""
     if not model:
         return 0.0
-    rt = round_trip_cost_per_share(entry, model["per_side_bps"], model["commission_usd"], model["shares"])
+    shares = shares_basis(risk, model["max_loss_usd"])[0] if model.get("max_loss_usd") else model["shares"]
+    rt = round_trip_cost_per_share(entry, model["per_side_bps"], model["commission_usd"], shares)
     return cost_r(rt, risk)
 
 
 # ---------------------------------------------------------------- the card
 
 def cost_card(entry, stop, target, shares, adv_usd=None, quote=None, now_ms=None, cfg=None, long=True,
-              adv_note=None, quote_note=None):
-    """Everything about one trade's costs in one dict (P12: Python computes, the model narrates)."""
+              adv_note=None, quote_note=None, max_loss_usd=None):
+    """Everything about one trade's costs in one dict (P12: Python computes, the model narrates).
+    max_loss_usd: the max loss the share count came from (shares_basis), recorded for model_of."""
     s = settings(cfg)
     risk = (entry - stop) if long else (stop - entry)
     if not risk > 0:
@@ -227,6 +232,7 @@ def cost_card(entry, stop, target, shares, adv_usd=None, quote=None, now_ms=None
     rr_gross = None if target is None else ((target - entry) if long else (entry - target)) / risk
     return {
         "entry": entry, "stop": stop, "target": target, "risk_per_share": round(risk, 6), "shares": shares,
+        "max_loss_usd": max_loss_usd,
         "adv_usd": None if adv_usd is None else round(float(adv_usd)), "adv_note": adv_note,
         "slippage_bps": slip, "half_spread_bps": round(half, 4), "spread_basis": used,
         "quote_state": qstate, "quote_note": quote_note, "quote": quote if quote else None,

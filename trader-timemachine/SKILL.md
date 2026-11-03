@@ -1,14 +1,15 @@
 ---
 name: trader-timemachine
 description: >-
-  Time Machine. Replays every possible outcome of a trade before you risk a
-  dollar: 10,000 simulated sessions plus every past time the setup fired.
-  Takes the plan from trader-exit (entry, stop, target), rebuilds the rest of
-  the day 10,000 times from the stock's own 5-minute bars over the last 60
-  days, and re-runs the same rule on every past session. Prints the odds of
-  target first, stop first, or neither by the close, where the price sits at
-  the close, the average R, the history, and one honest verdict, then hands
-  off to /trader-budget. Use when the user says "run the time machine",
+  Time Machine. Measures a trade before you risk a dollar: the plan's own rule
+  on every past session net of costs, beside a random-entry control and a
+  buy-any-morning-strength baseline, plus 10,000 simulated sessions as a
+  shape diagnostic. Takes the plan from trader-exit (entry, stop, target),
+  re-runs the same rule on every past session (60 days from Yahoo, or years
+  from Massive), and prints the net average R with its interval, the decided
+  count with its Wilson interval, the fragile decisions, a one-tick
+  sensitivity, the year table, and one verdict read from the history, then
+  hands off to /trader-budget. Use when the user says "run the time machine",
   "replay this trade", "what are the odds", "simulate this trade", "monte
   carlo", "backtest this setup", "how often does this hit the target", "is
   this a coin flip", or after /trader-exit writes a plan, before
@@ -20,11 +21,12 @@ argument-hint: "[path to plan.json, or TICKER]"
 
 The Time Machine sits between the plan and the money. trader-exit has set
 the entry, the stop and the target. Before anything is sized or sent, this
-skill asks one question: if today plays out like the stock's own last 60
-days, how often does this plan hit the target first, the stop first, or
-neither? It answers with 10,000 replays and with the real record of the same
-rule on every past session. It is a simulation built from the stock's own
-recent bars, not a prediction. Day trading loses most people money, and a
+skill asks one question: what did the same rule really do on the stock's own
+past sessions, after costs, and did its entry beat a random entry on those
+same sessions? It answers with the real record (60 days from Yahoo, or
+`--years N` from Massive), its intervals and a random-entry control, and adds
+10,000 replays as a shape diagnostic. It is a measurement of the past, not a
+prediction. Day trading loses most people money, and a
 good-looking replay does not change that.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
@@ -41,7 +43,9 @@ python3 "${CLAUDE_SKILL_DIR}/timemachine.py" chart --from           # ASCII fan 
 
 Other flags: `--replays N`, `--seed N` (default 19), `--window N` (default 2
 bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
-`--now "2026-10-19 10:15"` (New York time) to pin the clock.
+`--now "2026-10-19 10:15"` (New York time) to pin the clock,
+`--control-draws K` (default 3), `--gap-fill open|stop` (default open),
+`--no-costs` (gross only: upstream's mechanics with `--gap-fill stop`).
 
 ## What it reads and writes
 
@@ -49,7 +53,7 @@ bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
 | --- | --- |
 | `trader/plan.json` | the plan from trader-exit: symbol, date, entry, entry_time / entry_bar, stop, stop_rule, target, target_r, opening range |
 | Yahoo chart API | one request: 60 days of 5-minute bars (`range=60d&interval=5m`), free and unofficial, can lag |
-| `trader/timemachine.json` | with `--write`: `{plan, mc, history}` plus the verdict. `mc` holds the odds, percentiles, the fan-chart bands, 160 sample paths and a 24-bin histogram of the close |
+| `trader/timemachine.json` | with `--write`: `{data, plan, costs, mc, history, verdict_history, verdict_control, mc_shape, mc_notes}`. `history` holds the trades, `net` and `gross` (mean, lo, hi, n), `decided` (k, n, Wilson), `fragile`, `sensitivity`, `by_year`, `control`, `baseline`. `mc` holds the odds, percentiles, the fan-chart bands, 160 sample paths and a 24-bin histogram of the close |
 
 ## How it works
 
@@ -66,24 +70,36 @@ bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
    close, or 1:00 PM on an NYSE early-close day). Green, which means target
    first or above the entry at `--until`.
    R is +1 at a 1R target, -1 at the stop, and otherwise the distance from
-   the entry at `--until` divided by the risk. A gap through the stop still
-   counts as -1R here. A real fill can be worse.
+   the entry at `--until` divided by the risk. A bar that opens through the
+   stop fills at its open (worse than -1R; `--gap-fill stop` keeps -1R).
+   This block is a SHAPE diagnostic: an unconditional per-slot bootstrap,
+   not conditioned on the breakout, volatility regimes mixed. Its line
+   (`mc_shape`) states the two shares and no verdict reads it.
 4. **The history.** The plan's own rule (the same opening range, stop rule
-   and target R) runs again on every one of those past sessions. That is
-   what really happened, not a simulation.
-5. **The verdict** is one line from the numbers. It looks only at the
-   replays that hit one side, and asks how often the target came first. A
-   bigger target needs to win less often to break even: 1 in (1 + R). That
-   is 50 % at 1R, 33 % at 2R, 25 % at 3R. Less than 5 points from break-even:
-   "Close to a coin flip" at 1R, "Close to break-even" at any other R. 5 to
-   15 points: "Leans toward the target" or "Leans toward the stop". 15 or
-   more: "Strongly toward" one of them. So a 2R plan with target first
-   24.1 % and stop first 50.5 % is close to break-even (it needs 33 % of
-   the 74.6 % that hit a side, and got 32 %), not a loser.
-6. **Below the verdict**, when it applies: a line when more than 40 % of the
-   replays hit neither (the price at `--until` decides those), and the
-   average R when its sign goes against the lean. Those can only point the
-   other way because of the replays that hit neither.
+   and target R) runs again on every past session: the full ones and the
+   1:00 p.m. early closes (42 bars, scored to the 1:00 PM close, the flat-by
+   moved up three hours). Other short sessions are dropped and listed. The
+   entry is the unrounded bar close. Every trade is charged its own round
+   trip once (`costs`): slippage by the stock's ADV$ tier, the half spread,
+   the commission. That is what really happened, net of costs.
+5. **Every average comes with its interval and n**: the net and gross
+   average R (95 % bootstrap), the decided count (target or stop) with its
+   Wilson interval, the fragile decisions (the deciding touch cleared its
+   level by under 0.05 R), the one-tick sensitivity (how many outcomes flip
+   with the entry 1 cent higher or lower), and the net average by year with
+   a note when its sign flips between years.
+6. **The control and the baseline.** On every session where the rule fired,
+   K random entries after the opening range, with the rule's risk percent,
+   the same target multiple and flat-by: the paired net delta and its
+   interval. The baseline buys the close of the last opening-range bar on
+   every session: a diagnostic, never a verdict.
+7. **The verdicts** are fixed templates (`verdict_history`, `verdict_control`,
+   each with `state` pass / fail / unverified). The history verdict compares
+   the decided target rate's Wilson interval with the net break-even,
+   (1 + cost R) / (target R + 1): 56.5 % at 1R with a 0.13 R round trip.
+   Under 40 decided fires it says "Cannot judge". A plan with no target is
+   judged on its net average R against 0. The control verdict passes only
+   when the delta's interval is above 0 with at least 40 decided fires.
 
 **The seed.** The draws come from Python's `random.Random(seed)`, seed 19 by
 default. Same plan, same data, same seed: the same numbers, on any machine.
@@ -98,17 +114,21 @@ grid). A live in-progress bar is never used.
 
 ## Steps
 
-1. Make sure `trader/plan.json` is today's plan from `/trader-exit`. If there
-   is none, run that first, or pass the plan as flags.
+1. Make sure `trader/plan.json` is today's plan from `/trader-exit` (it
+   carries the cost card). If there is none, run that first, or pass the plan
+   as flags.
 2. Run `timemachine.py run --write`. Add `--until 15:55` when the plan has a
-   flat-by time, so "neither" means still open at the time you would get out.
-3. Tell the user, in this order: the four odds, the median and the 5 to 95
-   range of the price at the close, the average R, the history line, then the
-   verdict line and any line under it exactly as printed. Say the seed.
-4. If the verdict is a coin flip or close to break-even, say so plainly. Do
-   not dress it up. If the history and the replays disagree, say that too.
-5. Say once that this is built from the last 60 days and is not a prediction.
-   Earnings, news and halts can do things those 60 days never did. Check
+   flat-by time. With a Massive key, `--source massive --years 2` reads two
+   years instead of 60 days.
+3. Tell the user, in this order: the `verdict_history` text exactly as
+   printed, the `verdict_control` text exactly as printed, the net average R
+   with its interval and n, the decided count with its Wilson interval, the
+   fragile count and the one-tick flips. Then, if asked, the shape diagnostic
+   line. Say the seed.
+4. If the verdict says "Cannot judge" or "not distinguishable", say so
+   plainly. Do not dress it up, and never read the shape diagnostic as odds.
+5. Say once that this is a measurement of past sessions, not a prediction.
+   Earnings, news and halts can do things those sessions never did. Check
    `/trader-news` for the stock before going on.
 6. If the user still wants the trade, hand off to `/trader-budget` to size it.
 
@@ -117,32 +137,32 @@ grid). A live in-progress bar is never used.
 TSLA, Monday 2026-10-19. The 15-minute opening range is 354.47 to 362.18.
 The 10:10 bar closes above it: entry 364.18 at 10:15 AM (bar 8), stop 358.32
 (the range midpoint, rounded down), target 370.04 (1R, risk 5.86 a share).
+Upstream's 60 days of Yahoo bars, the 4 bp tier TSLA's ADV$ clears:
 
 ```
-10,000 replays of the rest of the session, 10:15 AM to 4:00 PM (69 five-minute bars), seed 19.
-  target first   29.4 %
-  stop first     25.5 %
-  neither        45.1 %   still open at 4:00 PM
-  green          51.7 %   target first, or above the entry at 4:00 PM
-  Price at 4:00 PM: median 364.36, 90 % of replays between 355.54 and 373.54.
-  Average R: +0.034
-History: the same rule on each of those 59 real sessions fired 33 times:
-13 target, 15 stop, 5 neither. Average R -0.062.
-Close to a coin flip: target first 29.4 % vs stop first 25.5 %.
-45.1 % of the replays hit neither by 4:00 PM; the price at 4:00 PM decides those.
+Costs: 0.7599 a share round trip = 0.130 R (4 bp slippage tier, ...; 3 bp half spread, the default, unverified; $1 commission a side over 8 shares).
+History: the same rule ... on each of those 59 real sessions fired 33 times: 13 target, 15 stop, 5 neither.
+Average R, net of costs, -0.261 (95 % bootstrap interval -0.592 to +0.074, n 33).
+  Gross average R -0.062 (95 % bootstrap interval -0.392 to +0.263, n 33); costs 0.199 R a trade on average.
+  Decided: 13 of 28 hit the target first (46.4 %, 95 % Wilson 29.5 % to 64.2 %); 11 of the 28 decided by under 0.05 R (fragile).
+  One-tick sensitivity: the entry 1 cent higher flips 1 outcome, 1 cent lower flips 0 (of 33).
+Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson [29.5%, 64.2%]); n is below the 40-fire floor. Net break-even at 1R after costs is 56.5%.
+Behind the random-entry control: net delta -0.293 R a trade (95% bootstrap [-0.581, -0.013]) over 33 paired sessions.
+Shape diagnostic (unconditional per-slot bootstrap, not conditioned on the breakout, vol regimes mixed): target first 29.4 % vs stop first 25.5 %.
 ```
 
-At 1R the target has to come first in half of the replays that hit one
-side. It did in 53.6 %. The replays came out close to a coin flip, and the
-real history was slightly worse than even. That is the honest answer for this setup, and it is what
-the user should hear before `/trader-budget` sizes 8 shares.
+Twenty-eight decided fires cannot tell a 46 % target rate from the 56.5 %
+the plan needs after costs: the interval runs from 29.5 % to 64.2 %. That is
+the honest answer for this setup, and it is what the user should hear before
+`/trader-budget` sizes anything.
 
 ## Rules
 
-- Every number comes from the run. Never round a coin flip up into an edge.
-- The verdict line and the lines under it are printed by the tool. Repeat
-  them, do not rewrite them. Never judge a 2R or 3R plan by target first vs
-  stop first alone: the verdict already weighs the target's R.
+- Every number comes from the run. Never round "Cannot judge" up into a yes.
+- The verdict lines are printed by the tool. Repeat them, do not rewrite
+  them. Never read the shape diagnostic (target first vs stop first) as the
+  verdict: it is not conditioned on the breakout.
+- Never print an average without its interval and n.
 - Simulated odds are not predictions and not promises. Say it once, plainly.
 - Free Yahoo data is unofficial and can lag. Bars are 5-minute bars, checked
   bar by bar, never tick by tick and never real time.
@@ -155,8 +175,11 @@ Pass `--source massive`, or export `TRADER_SOURCE=massive`, to build the history
 the Massive market-data API (or the read-only local stores when they hold the whole
 range) instead of Yahoo's 60 days. `--sessions N` takes the N sessions up to the
 plan's day (the default matches Yahoo's window); `--years N` takes every session of
-the N years before it. `data.range` then says how many sessions the file really
-holds, and `"source"` says `massive`. For `--offline`, `python3 -m mjonir.bridge
+the N years before it, through `mjonir.bars.bars_5m` (one store per run). `data.range`
+then says how many sessions the file really holds; `data.source` (api, cache, kalex or
+flatfile) and `data.adjustment` come from that call, never from the flag. ADV$ for the
+slippage tier also comes from Massive; under Yahoo it is unverified (the most
+expensive tier). For `--offline`, `python3 -m mjonir.bridge
 history SYM --from <date> --to <date>` writes `<SYM>-60d5m.json.gz`. Without the
 flag nothing changes. The early-close list extends itself from
 `trader/calendar.json` (`python3 -m mjonir.bridge calendar`).

@@ -49,8 +49,16 @@ def plan(**kw):
     return tm.normalize_plan(raw)
 
 
+# Mjonir chunk 2: costs are on and a gap through the stop fills at the open by default. These tests pin
+# upstream's mechanics, so the helper runs them with costs off and the stop filled at the stop (the
+# SIM_* pin); tests/test_timemachine_measure.py covers the defaults.
+UPSTREAM = {"costs": None, "gap_fill": "stop"}
+SHAPE = ("Shape diagnostic (unconditional per-slot bootstrap, not conditioned on the breakout, vol regimes "
+         "mixed): ")
+
+
 def machine(p=None, text=TEXT, now=NOW_UTC, **kw):
-    return tm.time_machine(text, p or plan(), now, **kw)
+    return tm.time_machine(text, p or plan(), now, **dict(UPSTREAM, **kw))
 
 
 def edited(fn):
@@ -122,11 +130,16 @@ class Reel(unittest.TestCase):
                          ("2026-07-28", 307.97, 304.89, 311.05, "target"))
 
     def test_the_verdict_says_coin_flip(self):
-        self.assertEqual(self.doc["verdict"], "Close to a coin flip: target first 29.4 % vs stop first 25.5 %.")
+        # chunk 2: no verdict reads the Monte Carlo. Its line is a shape diagnostic; the verdict reads the history
+        self.assertEqual(self.doc["mc_shape"], SHAPE + "target first 29.4 % vs stop first 25.5 %.")
+        self.assertNotIn("verdict", self.doc)
+        self.assertEqual(self.doc["verdict_history"]["text"],
+                         "Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson [29.5%, 64.2%]); "
+                         "n is below the 40-fire floor. Net break-even at 1R with costs off is 50.0%.")
         # 1R breaks even at 50 % of the replays that hit one side; the reel's target got 53.6 %
         gap, share, even = tm.lean(self.doc["mc"])
         self.assertEqual((round(share, 3), even), (0.536, 0.5))
-        self.assertEqual(self.doc["verdict_notes"],
+        self.assertEqual(self.doc["mc_notes"],
                          ["45.1 % of the replays hit neither by 4:00 PM; the price at 4:00 PM decides those."])
 
     def test_bands_start_at_the_entry(self):
@@ -150,7 +163,7 @@ class Reel(unittest.TestCase):
                      "target first   29.4 %", "stop first     25.5 %", "neither        45.1 %   still open at 4:00 PM",
                      "green          51.7 %", "median 364.36, 90 % of replays between 355.54 and 373.54",
                      "Average R: +0.034", "fired 33 times: 13 target, 15 stop, 5 neither. Average R -0.062",
-                     "Close to a coin flip: target first 29.4 % vs stop first 25.5 %.\n45.1 % of the replays "
+                     SHAPE + "target first 29.4 % vs stop first 25.5 %.\n45.1 % of the replays "
                      "hit neither by 4:00 PM; the price at 4:00 PM decides those.", "not a prediction", "--seed 19"):
             self.assertIn(line, text)
         for word in ("profit", "P&L", "guarantee", "real time", "tick by tick"):
@@ -230,7 +243,7 @@ class Bars(unittest.TestCase):
             keep_bars(res, lambda ts: not (et(ts).date().isoformat() == "2026-09-04" and et(ts).hour >= 13))
         doc = machine(text=edited(cut), replays=300)
         self.assertEqual(doc["mc"]["pool_sessions"], 58)
-        self.assertEqual(doc["data"]["short_sessions_left_out"], [{"date": "2026-09-04", "bars": 42}])
+        self.assertEqual(doc["data"]["incomplete_dropped"], [{"date": "2026-09-04", "bars": 42}])  # not on the calendar
         self.assertEqual(doc["history"]["sessions"], 58)
         self.assertNotIn("2026-09-04", [t["date"] for t in doc["history"]["trades"]])
         self.assertIn("Left out 1 short session", "\n".join(tm.report(doc)))
@@ -393,41 +406,44 @@ class Plans(unittest.TestCase):
         self.assertIn("below the entry", "\n".join(tm.report(doc)))
 
     def test_the_verdict_thresholds_at_1r(self):
-        # 1R: the target's share of the replays that hit one side against 50 %
-        self.assertTrue(tm.verdict({"p_target": 0.30, "p_stop": 0.26}).startswith("Close to a coin flip"))
-        self.assertTrue(tm.verdict({"p_target": 0.40, "p_stop": 0.30}).startswith("Leans toward the target"))
-        self.assertTrue(tm.verdict({"p_target": 0.20, "p_stop": 0.30}).startswith("Leans toward the stop"))
-        self.assertTrue(tm.verdict({"p_target": 0.60, "p_stop": 0.30}).startswith("Strongly toward the target"))
-        self.assertEqual(tm.verdict({"p_target": 0.10, "p_stop": 0.60, "r_at_target": 1.0}),
-                         "Strongly toward the stop: target first 10.0 % vs stop first 60.0 %.")
-        self.assertEqual(tm.verdict({"p_target": 0.0, "p_stop": 0.0, "until": "15:55"}),
-                         "No replay reached the target or the stop by 3:55 PM: the price at 3:55 PM decides every one.")
+        # chunk 2: the Monte Carlo line has no thresholds and no lean words; it states the two shares
+        self.assertEqual(tm.mc_shape_line({"p_target": 0.30, "p_stop": 0.26}),
+                         SHAPE + "target first 30.0 % vs stop first 26.0 %.")
+        self.assertEqual(tm.mc_shape_line({"p_target": 0.10, "p_stop": 0.60, "r_at_target": 1.0}),
+                         SHAPE + "target first 10.0 % vs stop first 60.0 %.")
+        self.assertEqual(tm.mc_shape_line({"p_target": 0.0, "p_stop": 0.0, "until": "15:55"}),
+                         SHAPE + "no replay reached the target or the stop by 3:55 PM; the price at 3:55 PM decides "
+                                 "every one.")
+        for word in ("coin flip", "Leans", "Strongly"):
+            for mc in ({"p_target": 0.30, "p_stop": 0.26}, {"p_target": 0.40, "p_stop": 0.30},
+                       {"p_target": 0.60, "p_stop": 0.30}):
+                self.assertNotIn(word, tm.mc_shape_line(mc))
 
     def test_a_2r_target_is_judged_against_its_break_even(self):
         # the live TSLA run of 2026-10-20 (entry 370.58, stop 367.06, 2R target 377.62): it needs 33 %, got 32 %
         mc = {"p_target": 0.241, "p_stop": 0.505, "p_neither": 0.254, "r_at_target": 2.0, "avg_R": 0.095}
-        self.assertEqual(tm.verdict(mc), "Close to break-even: at 2R the target has to come first in 33 % of the "
-                                         "replays that hit one side; it did in 32 % (target first 24.1 % vs stop "
-                                         "first 50.5 %).")
+        self.assertEqual(tm.mc_shape_line(mc), SHAPE + "at 2R the target has to come first in 33 % of the "
+                                                       "replays that hit one side; it did in 32 % (target first "
+                                                       "24.1 % vs stop first 50.5 %).")
         self.assertEqual(tm.verdict_notes(mc), [])
         lean = dict(mc, p_target=0.15, p_stop=0.55)
-        self.assertTrue(tm.verdict(lean).startswith("Leans toward the stop: at 2R the target has to come first in "
-                                                    "33 % of the replays that hit one side; it did in 21 %"))
+        self.assertTrue(tm.mc_shape_line(lean).startswith(SHAPE + "at 2R the target has to come first in "
+                                                          "33 % of the replays that hit one side; it did in 21 %"))
         self.assertEqual(tm.verdict_notes(lean), ["Average R is +0.095 all the same: the replays that hit neither "
                                                   "pull it the other way."])
-        self.assertTrue(tm.verdict(dict(mc, p_target=0.30, p_stop=0.40)).startswith("Leans toward the target"))
-        self.assertTrue(tm.verdict(dict(mc, p_target=0.40, p_stop=0.40)).startswith("Strongly toward the target"))
-        self.assertIn("at 1.5R the target has to come first in 40 %", tm.verdict(dict(mc, r_at_target=1.5)))
+        self.assertIn("it did in 43 %", tm.mc_shape_line(dict(mc, p_target=0.30, p_stop=0.40)))
+        self.assertIn("it did in 50 %", tm.mc_shape_line(dict(mc, p_target=0.40, p_stop=0.40)))
+        self.assertIn("at 1.5R the target has to come first in 40 %", tm.mc_shape_line(dict(mc, r_at_target=1.5)))
 
     def test_2r_on_the_fixture_near_break_even(self):
         # stop 362.00, 2R target 368.54: 33.5 % vs 62.4 % looks lopsided, but 2R only needs a third
         doc = machine(plan(stop=362.0, target=368.54, stop_rule="pct"))
         m = doc["mc"]
         self.assertEqual((m["r_at_target"], m["p_target"], m["p_stop"], m["avg_R"]), (2.0, 0.3345, 0.6238, 0.068))
-        self.assertEqual(doc["verdict"], "Close to break-even: at 2R the target has to come first in 33 % of the "
-                                         "replays that hit one side; it did in 35 % (target first 33.5 % vs stop "
-                                         "first 62.4 %).")
-        self.assertEqual(doc["verdict_notes"], [])
+        self.assertEqual(doc["mc_shape"], SHAPE + "at 2R the target has to come first in 33 % of the "
+                                                  "replays that hit one side; it did in 35 % (target first 33.5 % "
+                                                  "vs stop first 62.4 %).")
+        self.assertEqual(doc["mc_notes"], [])
 
     def test_2r_on_the_fixture_a_clear_lean(self):
         # the reel's entry and stop with a 2R target 375.90: the target first only 4.0 % vs stop first 25.6 %
@@ -435,14 +451,14 @@ class Plans(unittest.TestCase):
         m = doc["mc"]
         self.assertEqual((m["r_at_target"], m["p_target"], m["p_stop"], m["p_neither"], m["avg_R"]),
                          (2.0, 0.0397, 0.2558, 0.7045, 0.042))
-        self.assertEqual(doc["verdict"], "Strongly toward the stop: at 2R the target has to come first in 33 % of "
-                                         "the replays that hit one side; it did in 13 % (target first 4.0 % vs stop "
-                                         "first 25.6 %).")
-        self.assertEqual(doc["verdict_notes"], [
+        self.assertEqual(doc["mc_shape"], SHAPE + "at 2R the target has to come first in 33 % of "
+                                                  "the replays that hit one side; it did in 13 % (target first 4.0 % "
+                                                  "vs stop first 25.6 %).")
+        self.assertEqual(doc["mc_notes"], [
             "70.5 % of the replays hit neither by 4:00 PM; the price at 4:00 PM decides those.",
             "Average R is +0.042 all the same: the replays that hit neither pull it the other way."])
         text = "\n".join(tm.report(doc))
-        self.assertIn(doc["verdict"] + "\n" + doc["verdict_notes"][0] + "\n" + doc["verdict_notes"][1], text)
+        self.assertIn(doc["mc_shape"] + "\n" + doc["mc_notes"][0] + "\n" + doc["mc_notes"][1], text)
 
 
 class Network(unittest.TestCase):
@@ -530,7 +546,7 @@ class Cli(unittest.TestCase):
         code, text, err = run(["run", "--plan", self.plan, "--offline", TSLA, "--now", NOW, "--write", self.out])
         self.assertEqual(code, 0, err)
         self.assertIn("target first   29.4 %", text)
-        self.assertIn("Close to a coin flip: target first 29.4 % vs stop first 25.5 %.", text)
+        self.assertIn(SHAPE + "target first 29.4 % vs stop first 25.5 %.", text)
         self.assertIn("Wrote %s." % self.out, text)
         self.assertIn("/trader-budget", text)
         with open(self.out) as fh:
@@ -549,7 +565,8 @@ class Cli(unittest.TestCase):
         doc = json.loads(text)
         self.assertEqual(doc["mc"]["p_stop"], 0.2548)
         self.assertNotIn("sample_paths", doc["mc"])
-        self.assertEqual(doc["verdict"][:20], "Close to a coin flip")
+        self.assertEqual(doc["verdict_history"]["text"][:13], "Cannot judge:")
+        self.assertEqual(doc["mc_shape"][:17], "Shape diagnostic ")
         self.assertFalse(os.path.exists(self.out))
 
     def test_the_plan_as_flags_matches_the_file(self):
@@ -604,7 +621,7 @@ class Cli(unittest.TestCase):
         self.assertTrue(any(l.startswith("   364.18 |*") and l.endswith("  entry") for l in lines))
         self.assertIn("10:15", text)
         self.assertIn("4:00", text)
-        self.assertEqual(lines[-2:], ["Close to a coin flip: target first 29.4 % vs stop first 25.5 %.",
+        self.assertEqual(lines[-2:], [SHAPE + "target first 29.4 % vs stop first 25.5 %.",
                                       "45.1 % of the replays hit neither by 4:00 PM; the price at 4:00 PM decides those."])
         code, again, _ = run(["chart", "--plan", self.plan, "--offline", TSLA, "--now", NOW])
         self.assertEqual(again, text)
