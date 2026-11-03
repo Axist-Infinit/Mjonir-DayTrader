@@ -232,12 +232,83 @@ Allowed before the freeze: counts only, never a price, a volume or an outcome. F
 
 To be filled by `tools/rvol_study.py --counts-only` (which scores nothing and prints no price) before the freeze, each for both windows, and pasted here by the lead as the last pre-freeze edit:
 
-- `reference_rows_by_month`: CS and ADRC row counts per monthly walk, and the request count.
-- `splits_rows`: the number of split rows in the splits walk.
-- `eligible_per_session`: the median and the interquartile range of eligible names per session after sections 3.2 to 3.4 and 4.3.
-- `exclusions_by_cause`: name-days removed by `insufficient_history`, `split_guard`, `gap_guard`, `no_first_bar`, `rvol_history_short`, and the `warmup` sessions.
-- `first_bar_coverage`: the share of eligible name-days whose full `RVOL_N` first-bar history is present.
-- `early_close_basis`: verified or contradicted, per rule date.
+- `reference_rows_by_month`: CS and ADRC row counts per monthly walk, and the request count. Filled from the run of 2026-11-03 (the table below): development 36 monthly walks of each type, 2021-01 to 2023-12 (CS 4,778 to 5,844 rows, ADRC 419 to 454), 249 requests; holdout 32 monthly walks of each type, 2024-01 to 2026-08 (CS 5,119 to 5,342 rows, ADRC 376 to 422), 224 requests.
+- `splits_rows`: the number of split rows in the splits walk. Filled: 7,359 rows (one walk for both windows, 8 pages).
+- `eligible_per_session`: the median and the interquartile range of eligible names per session after sections 3.2 to 3.4 and 4.3. Filled: development median 1,003, interquartile range 959.5 to 1,076 (min 852, max 1,334), over 739 sessions; holdout median 1,223, interquartile range 1,056 to 1,371 (min 919, max 1,600), over 649 sessions.
+- `exclusions_by_cause`: name-days removed by `insufficient_history`, `split_guard`, `gap_guard`, `no_first_bar`, `rvol_history_short`, and the `warmup` sessions. Filled (each name-day under the first cause it fails, in the order shown; the three floors of section 3.3 counted beside them; out of 4,417,487 development and 3,647,768 holdout name-days in the type lists): development `insufficient_history` 426,883, `split_guard` 16,958, `below_price` 1,043,541, `below_adv_usd` 1,706,380, `below_adv_shares` 464,791, `no_first_bar` 420, `gap_guard` 19, `rvol_history_short` 2,990; `warmup` 14 sessions; holdout `insufficient_history` 219,143, `split_guard` 29,721, `below_price` 1,041,908, `below_adv_usd` 1,168,156, `below_adv_shares` 391,884, `no_first_bar` 397, `gap_guard` 28, `rvol_history_short` 2,984; `warmup` 0 sessions.
+- `first_bar_coverage`: the share of eligible name-days whose full `RVOL_N` first-bar history is present. Filled: development 0.9961; holdout 0.9963.
+- `early_close_basis`: verified or contradicted, per rule date. Filled: development 2021-11-26 verified, 2022-11-25 verified, 2023-07-03 verified, 2023-11-24 verified; holdout 2024-07-03 verified, 2024-11-29 verified, 2024-12-24 verified, 2025-07-03 verified, 2025-11-28 verified, 2025-12-24 verified (SPY's buckets from 09:30 to 16:00, the 13:00:00 closing print left out); short sessions that are not a rule date: 0 and 0; refused sessions: none.
+
+| month | as of | CS | ADRC |
+| --- | --- | --- | --- |
+| 2021-01 | 2021-01-04 | 4,778 | 427 |
+| 2021-02 | 2021-02-01 | 4,851 | 424 |
+| 2021-03 | 2021-03-01 | 4,926 | 431 |
+| 2021-04 | 2021-04-01 | 5,057 | 439 |
+| 2021-05 | 2021-05-03 | 5,199 | 437 |
+| 2021-06 | 2021-06-01 | 5,272 | 440 |
+| 2021-07 | 2021-07-01 | 5,342 | 450 |
+| 2021-08 | 2021-08-02 | 5,423 | 449 |
+| 2021-09 | 2021-09-01 | 5,465 | 450 |
+| 2021-10 | 2021-10-01 | 5,529 | 449 |
+| 2021-11 | 2021-11-01 | 5,586 | 449 |
+| 2021-12 | 2021-12-01 | 5,645 | 453 |
+| 2022-01 | 2022-01-03 | 5,719 | 454 |
+| 2022-02 | 2022-02-01 | 5,779 | 453 |
+| 2022-03 | 2022-03-01 | 5,809 | 454 |
+| 2022-04 | 2022-04-01 | 5,833 | 450 |
+| 2022-05 | 2022-05-02 | 5,841 | 450 |
+| 2022-06 | 2022-06-01 | 5,844 | 446 |
+| 2022-07 | 2022-07-01 | 5,842 | 445 |
+| 2022-08 | 2022-08-01 | 5,830 | 446 |
+| 2022-09 | 2022-09-01 | 5,813 | 448 |
+| 2022-10 | 2022-10-03 | 5,815 | 438 |
+| 2022-11 | 2022-11-01 | 5,776 | 439 |
+| 2022-12 | 2022-12-01 | 5,750 | 438 |
+| 2023-01 | 2023-01-03 | 5,647 | 435 |
+| 2023-02 | 2023-02-01 | 5,615 | 434 |
+| 2023-03 | 2023-03-01 | 5,589 | 431 |
+| 2023-04 | 2023-04-03 | 5,539 | 430 |
+| 2023-05 | 2023-05-01 | 5,517 | 426 |
+| 2023-06 | 2023-06-01 | 5,556 | 421 |
+| 2023-07 | 2023-07-03 | 5,523 | 419 |
+| 2023-08 | 2023-08-01 | 5,494 | 422 |
+| 2023-09 | 2023-09-01 | 5,463 | 422 |
+| 2023-10 | 2023-10-02 | 5,454 | 424 |
+| 2023-11 | 2023-11-01 | 5,424 | 424 |
+| 2023-12 | 2023-12-01 | 5,388 | 422 |
+| 2024-01 | 2024-01-02 | 5,337 | 422 |
+| 2024-02 | 2024-02-01 | 5,342 | 420 |
+| 2024-03 | 2024-03-01 | 5,315 | 417 |
+| 2024-04 | 2024-04-01 | 5,293 | 411 |
+| 2024-05 | 2024-05-01 | 5,284 | 404 |
+| 2024-06 | 2024-06-03 | 5,257 | 405 |
+| 2024-07 | 2024-07-01 | 5,242 | 404 |
+| 2024-08 | 2024-08-01 | 5,228 | 403 |
+| 2024-09 | 2024-09-03 | 5,199 | 401 |
+| 2024-10 | 2024-10-01 | 5,194 | 400 |
+| 2024-11 | 2024-11-01 | 5,190 | 400 |
+| 2024-12 | 2024-12-02 | 5,171 | 403 |
+| 2025-01 | 2025-01-02 | 5,157 | 403 |
+| 2025-02 | 2025-02-03 | 5,136 | 403 |
+| 2025-03 | 2025-03-03 | 5,137 | 401 |
+| 2025-04 | 2025-04-01 | 5,133 | 398 |
+| 2025-05 | 2025-05-01 | 5,119 | 399 |
+| 2025-06 | 2025-06-02 | 5,119 | 393 |
+| 2025-07 | 2025-07-01 | 5,149 | 391 |
+| 2025-08 | 2025-08-01 | 5,199 | 392 |
+| 2025-09 | 2025-09-02 | 5,213 | 392 |
+| 2025-10 | 2025-10-01 | 5,228 | 388 |
+| 2025-11 | 2025-11-03 | 5,230 | 387 |
+| 2025-12 | 2025-12-01 | 5,239 | 384 |
+| 2026-01 | 2026-01-02 | 5,228 | 380 |
+| 2026-02 | 2026-02-02 | 5,244 | 377 |
+| 2026-03 | 2026-03-02 | 5,264 | 378 |
+| 2026-04 | 2026-04-01 | 5,266 | 380 |
+| 2026-05 | 2026-05-01 | 5,275 | 378 |
+| 2026-06 | 2026-06-01 | 5,287 | 379 |
+| 2026-07 | 2026-07-01 | 5,305 | 377 |
+| 2026-08 | 2026-08-03 | 5,308 | 376 |
 
 Not read before the freeze: fires per session (it depends on the first bar's direction), any outcome, any mean.
 
