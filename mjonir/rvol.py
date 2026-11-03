@@ -5,6 +5,9 @@ scanner (trader-scanner/scan.py rvol) and the study (tools/rvol_study.py), P8. S
     bar_stage(passed, first_bars, history, rvol_n, gap)       the first bar of D, the gap guard, the RVOL history
     rank(eligible, top)                                       the day's list L(D): RVOL descending, ties by ticker,
                                                               direction-agnostic; then fire = the first bar is up
+                                                              (the day's orders: a buy-stop at its high plus TICK)
+    stop_fill(bars, level, first, until)                      a buy-stop's fill: (k, entry) or None (no_fill)
+    atr_of(rows, n)                                           trader-exit daily_atr's arithmetic
     direction(o, c)                                           "up" only when the close is strictly above the open
                                                               on unrounded values; a doji is not up
     first_bar(rows, day)                                      the 09:30 bucket of a session's 5-minute rows
@@ -15,9 +18,12 @@ The funnel, in order; a name-day is counted under the FIRST cause it fails:
   below_price           the close of the session before D under floors.min_price
   below_adv_usd         the mean of close x volume over the window under floors.min_adv_usd
   below_adv_shares      the mean volume over the window under floors.min_avg_volume
+  below_atr             the simple mean of ATR_N true ranges (the window's last ATR_N + 1 rows) under
+                        floors.min_atr_usd (the paper's ATR floor; None turns it off)
   no_first_bar          D's 09:30 bucket absent, without a positive volume, or without an open and a close
   gap_guard             that bucket's open under GAP_GUARD[0] or over GAP_GUARD[1] times the prior close
   rvol_history_short    one of the rvol_n prior sessions' 09:30 buckets absent or without a positive volume
+  below_rvol            the RVOL under min_rvol (RVOL_MIN, the paper's floor; None turns it off)
 No row of session D is read before the first-bar stage: the floors use the window before D only.
 
 scan(fetch, cal, day, symbols, floors, ...) is the live scanner's two stages: one full-market snapshot ranks
@@ -41,8 +47,12 @@ GAP_GUARD = (0.4, 2.5)
 P_MIN = 5.0
 ADV_USD_MIN = 20000000.0
 ADV_SH_MIN = 1000000.0
-FLOOR_CAUSES = ("insufficient_history", "split_guard", "below_price", "below_adv_usd", "below_adv_shares")
-BAR_CAUSES = ("no_first_bar", "gap_guard", "rvol_history_short")
+ATR_N = 14
+ATR_MIN = 0.50
+RVOL_MIN = 1.0
+TICK = 0.01
+FLOOR_CAUSES = ("insufficient_history", "split_guard", "below_price", "below_adv_usd", "below_adv_shares", "below_atr")
+BAR_CAUSES = ("no_first_bar", "gap_guard", "rvol_history_short", "below_rvol")
 CAUSES = FLOOR_CAUSES + BAR_CAUSES
 WORKERS = 8
 OPEN = _dt.time(9, 30)
@@ -74,12 +84,32 @@ def _fb(fb):
     return {"o": o, "h": h, "l": l, "c": c, "v": v}
 
 
+def atr_of(rows, n=ATR_N):
+    """trader-exit daily_atr's arithmetic: the mean of n true ranges from the last n + 1 daily rows (o, h, l, c, v),
+    TR = max(high - low, |high - prior close|, |low - prior close|)."""
+    rows = rows[-(n + 1):]
+    trs = [max(r[1] - r[2], abs(r[1] - rows[i][3]), abs(r[2] - rows[i][3])) for i, r in enumerate(rows[1:])]
+    return sum(trs) / len(trs)
+
+
+def stop_fill(bars, level, first, until):
+    """A buy-stop at `level`, live from bar `first` through bar `until` (positions in `bars`, dicts {o,h,l,c} or
+    (t, o, h, l, c, v) tuples): (k, entry) for the first bar whose high reaches the level, filled at max(level,
+    its open), unrounded (a bar opening past the level fills at its open); None when no bar reaches it."""
+    from .outcomes import ohlc
+    for k in range(int(first), min(int(until), len(bars) - 1) + 1):
+        o, h, _l, _c = ohlc(bars[k])
+        if not h < level:
+            return k, max(level, o)
+    return None
+
+
 def floors_stage(symbols, daily, split_hit, floors, adv_n=ADV_N):
     """The floors of section 3.3 and the split guard of 3.4, from the adv_n sessions strictly before D.
     daily(sym) -> that window's rows present, oldest first, each (o, h, l, c, v) (a missing session is simply
     absent); split_hit(sym) -> True when a split executed inside [the window's first session, D];
-    floors: {min_price, min_adv_usd, min_avg_volume}.
-    Returns ({sym: {price, adv_usd, adv_shares, rows}}, {cause: n}) over the symbols, sorted."""
+    floors: {min_price, min_adv_usd, min_avg_volume, min_atr_usd (absent or None: off)}.
+    Returns ({sym: {price, adv_usd, adv_shares, atr, rows}}, {cause: n}) over the symbols, sorted."""
     counts = dict((c, 0) for c in FLOOR_CAUSES)
     passed = {}
     for sym in sorted(set(symbols)):
@@ -103,16 +133,21 @@ def floors_stage(symbols, daily, split_hit, floors, adv_n=ADV_N):
         if adv_shares < floors["min_avg_volume"]:
             counts["below_adv_shares"] += 1
             continue
-        passed[sym] = {"price": price, "adv_usd": adv_usd, "adv_shares": adv_shares, "rows": rows}
+        atr = atr_of(rows, ATR_N)
+        if floors.get("min_atr_usd") is not None and atr < floors["min_atr_usd"]:
+            counts["below_atr"] += 1
+            continue
+        passed[sym] = {"price": price, "adv_usd": adv_usd, "adv_shares": adv_shares, "atr": atr, "rows": rows}
     return passed, counts
 
 
-def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD, rows=True):
+def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD, rows=True, min_rvol=RVOL_MIN):
     """Section 4.3 and the gap guard of 3.4 on the names past the floors. first_bars: {sym: first bar of D};
     history(sym) -> the 09:30 volumes of the rvol_n sessions strictly before D, oldest first, None where a
     session has no bucket. Returns ([{symbol, rvol, first_bar, direction, price, adv_usd, adv_shares}],
     {cause: n}), sorted by symbol. rows=False (the study's counts-only mode) returns the eligible SYMBOLS
-    only: no RVOL and no direction is computed for any name."""
+    only: no direction is read and no RVOL is kept for any name (the RVOL_MIN comparison is made, its value is
+    not returned)."""
     counts = dict((c, 0) for c in BAR_CAUSES)
     out = []
     for sym in sorted(passed):
@@ -128,14 +163,17 @@ def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD, rows=Tr
         if len(hist) < rvol_n or any(h is None or not h > 0 for h in hist[-rvol_n:]):
             counts["rvol_history_short"] += 1
             continue
+        hist = hist[-rvol_n:]
+        mean = sum(float(h) for h in hist) / rvol_n
+        if min_rvol is not None and float(fb["v"]) < min_rvol * mean:
+            counts["below_rvol"] += 1
+            continue
         if not rows:
             out.append(sym)
             continue
-        hist = hist[-rvol_n:]
-        mean = sum(float(h) for h in hist) / rvol_n
         out.append({"symbol": sym, "rvol": float(fb["v"]) / mean, "first_bar": fb,
                     "direction": direction(fb["o"], fb["c"]), "price": p["price"], "adv_usd": p["adv_usd"],
-                    "adv_shares": p["adv_shares"]})
+                    "adv_shares": p["adv_shares"], "atr": p.get("atr")})
     return out, counts
 
 
@@ -324,6 +362,7 @@ def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV
         rows.append({"symbol": r["symbol"], "rvol": r["rvol"], "rank": r["rank"],
                      "first_bar": {"o": fb["o"], "h": fb["h"], "l": fb["l"], "c": fb["c"], "v": fb["v"]},
                      "direction": r["direction"], "adv_usd": r["adv_usd"], "price": r["price"], "fire": r["fire"],
+                     "level": (fb["h"] + TICK) if r["fire"] else None, "atr": r.get("atr"),
                      "volume_x": vx.get(r["symbol"])})
     funnel = dict(c_floor)
     funnel.update(c_bar)
@@ -334,6 +373,7 @@ def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV
             "fires": [r["symbol"] for r in rows if r["fire"]],
             "windows": {"adv": [adv_days[0].isoformat(), adv_days[-1].isoformat()],
                         "rvol_history": [hist_days[0].isoformat(), hist_days[-1].isoformat()]},
-            "params": {"top": int(top), "lookback": int(lookback), "adv_sessions": int(adv_n),
+            "params": {"top": int(top), "lookback": int(lookback), "adv_sessions": int(adv_n), "min_rvol": RVOL_MIN,
+                       "tick": TICK,
                        "shortlist": int(shortlist) if shortlist else None, "gap_guard": list(gap),
                        "floors": dict(floors)}}

@@ -49,8 +49,8 @@ class Store(object):
 
     def add(self, sym, price, daily_v, hist_v, d_bar, days=None):
         for d in (self.adv_days if days is None else days):
-            self.daily.setdefault(d, {})[sym] = {"o": price, "h": price * 1.01, "l": price * 0.99, "c": price,
-                                                 "v": daily_v}
+            self.daily.setdefault(d, {})[sym] = {"o": price, "h": price * 1.03, "l": price * 0.97, "c": price,
+                                                 "v": daily_v}      # a 6% daily range: an ATR over the floor
         per = {}
         for d, v in zip(self.hist_days, hist_v):
             if v is not None:
@@ -104,7 +104,9 @@ class Rules(unittest.TestCase):
         self.assertAlmostEqual(row["adv_usd"], 30.0 * 2e6)
         self.assertEqual(row["price"], 30.0)
         self.assertEqual(sorted(row), sorted(["symbol", "rvol", "rank", "first_bar", "direction", "adv_usd", "price",
-                                              "fire", "volume_x"]))
+                                              "fire", "level", "atr", "volume_x"]))
+        self.assertEqual(row["level"], 31.0 + 0.01)               # the order: a buy-stop at the 9:30 high plus a tick
+        self.assertAlmostEqual(row["atr"], 0.06 * 30.0)           # 14 true ranges of the store's 6% daily range
         # the stage-2 history is the 14 sessions strictly before D, and D itself
         syms, days = st.calls["first_bars"][0]
         self.assertEqual(days, st.hist_days + [DAY])
@@ -167,14 +169,33 @@ class Rules(unittest.TestCase):
         st.add("SPLIT", 30.0, 2e6, hist, (30.0, 31.0, 29.0, 30.5, 500.0))
         st.add("NOBAR", 30.0, 2e6, hist, None)
         st.add("YOUNG", 30.0, 2e6, hist, (30.0, 31.0, 29.0, 30.5, 500.0), days=st.adv_days[1:])   # 19 sessions
+        st.add("QUIET", 30.0, 2e6, hist, (30.0, 31.0, 29.0, 30.5, 99.0))       # RVOL 0.99, under RVOL_MIN
+        st.add("FLAT", 30.0, 2e6, hist, (30.0, 31.0, 29.0, 30.5, 500.0))
+        for d in st.adv_days:                                                  # a 0.4% daily range: ATR 0.12
+            st.daily[d]["FLAT"].update(h=30.06, l=29.94)
         st.split_rows = [{"ticker": "SPLIT", "execution_date": st.adv_days[3].isoformat()},
                          {"ticker": "OK", "execution_date": (st.adv_days[0] - dt.timedelta(days=3)).isoformat()}]
-        doc = R.scan(st, CAL, DAY, sorted(st.bars), FLOORS, live=False)
+        doc = R.scan(st, CAL, DAY, sorted(st.bars), dict(FLOORS, min_atr_usd=R.ATR_MIN), live=False)
         f = doc["funnel"]
         self.assertEqual({k: f[k] for k in R.CAUSES}, {
             "insufficient_history": 1, "split_guard": 1, "below_price": 1, "below_adv_usd": 1, "below_adv_shares": 0,
-            "no_first_bar": 1, "gap_guard": 1, "rvol_history_short": 0})
+            "below_atr": 1, "no_first_bar": 1, "gap_guard": 1, "rvol_history_short": 0, "below_rvol": 1})
         self.assertEqual([r["symbol"] for r in doc["rows"]], ["OK"])
+        # the ATR floor off (no key): FLAT is eligible
+        doc = R.scan(st, CAL, DAY, sorted(st.bars), FLOORS, live=False)
+        self.assertEqual(([r["symbol"] for r in doc["rows"]], doc["funnel"]["below_atr"]), (["FLAT", "OK"], 0))
+
+    def test_stop_fill(self):
+        bars = [{"o": 10.0, "h": 10.2, "l": 9.9, "c": 10.1}, {"o": 10.1, "h": 10.19, "l": 10.0, "c": 10.1},
+                {"o": 10.1, "h": 10.21, "l": 10.05, "c": 10.2}, {"o": 10.5, "h": 10.6, "l": 10.4, "c": 10.5}]
+        level = 10.2 + R.TICK
+        self.assertEqual(R.stop_fill(bars, level, 1, 3), (2, level))           # a touch: filled at the level
+        self.assertEqual(R.stop_fill(bars, level, 3, 3), (3, 10.5))            # a gap through: filled at the open
+        self.assertIsNone(R.stop_fill(bars, level, 1, 1))                      # never reached by the cancel bar
+        self.assertIsNone(R.stop_fill(bars, 11.0, 1, 3))
+        self.assertIsNone(R.stop_fill(bars, level, 1, 0))
+        self.assertEqual(R.stop_fill(bars, 10.19, 1, 9), (1, 10.19))           # at the level exactly; until capped
+        self.assertEqual(R.stop_fill([(0, 10.0, 10.3, 9.9, 10.1, 5.0)] * 2, 10.25, 1, 1), (1, 10.25))   # tuples
 
     def test_rows_false_counts_the_same_and_computes_nothing_per_name(self):
         st = Store(["AAA", "BBB"])
@@ -347,19 +368,21 @@ class Cli(unittest.TestCase):
         self.assertIn("record: recorded UPP 2026-10-19 09:35", err)
         with open(os.path.join(self.rec, "triggers.jsonl")) as fh:
             rows = [json.loads(x) for x in fh]
-        self.assertEqual([r["symbol"] for r in rows], ["UPP"])          # the fire only, not the down bar
+        self.assertEqual([r["symbol"] for r in rows], ["UPP"])          # the order only, not the down bar
         t = rows[0]
         self.assertEqual((t["kind"], t["setup"], t["date"]), ("trigger", "rvol_orb5", "2026-10-19"))
-        self.assertEqual((t["trigger"]["time"], t["trigger"]["bar_index"], t["trigger"]["price"]), ("09:35", 0, 30.6))
-        self.assertEqual((t["trigger"]["or_high"], t["trigger"]["or_low"]), (31.0, 29.8))
-        self.assertEqual(t["trigger"]["rvol"], 50.0)
-        self.assertEqual(t["trigger"]["volume_x"], 15000.0 / 2e6)
+        tg = t["trigger"]
+        self.assertEqual((tg["time"], tg["bar_index"], tg["price"], tg["level"]), ("09:35", None, 31.01, 31.01))
+        self.assertEqual(tg["order"], {"type": "buy_stop", "level": 31.01, "cancel_at": "15:30"})
+        self.assertEqual((tg["or_high"], tg["or_low"]), (31.0, 29.8))
+        self.assertEqual(tg["rvol"], 50.0)
+        self.assertEqual(tg["volume_x"], 15000.0 / 2e6)
         rule = t["rule"]
         self.assertEqual((rule["setup"], rule["or_minutes"], rule["stop_rule"], rule["stop_param"], rule["target_r"],
                           rule["exit"], rule["flat_by"]), ("rvol_orb5", 5, "datr", 0.1, None, "close", "15:55"))
         self.assertEqual(int(rule["or_minutes"]) // 5, 1)                 # record.py's n_or
         p = t["plan"]
-        self.assertEqual((p["entry"], p["target"], p["exit"], p["entry_bar"]), (30.6, None, "close", 0))
+        self.assertEqual((p["entry"], p["target"], p["exit"], p["entry_bar"]), (31.01, None, "close", None))
         self.assertIn("datr:0.10", t["plan"]["basis"])
         # the datr stop: a tenth of the mean of 14 true ranges from 15 daily rows before the day, floored to the cent
         rows15 = self.daily_rows(None, None, "UPP", CAL.sessions_back(CAL.prev_session(DAY), 15)[0],
@@ -367,30 +390,66 @@ class Cli(unittest.TestCase):
         trs = [max(h - lo, abs(h - rows15[i][4]), abs(lo - rows15[i][4]))
                for i, (_, _o, h, lo, _c, _v) in enumerate(rows15[1:])]
         atr = sum(trs) / len(trs)
-        self.assertAlmostEqual(p["stop"], math.floor(round((30.6 - 0.1 * atr) * 100, 6)) / 100.0)
+        self.assertAlmostEqual(p["stop"], math.floor(round((31.01 - 0.1 * atr) * 100, 6)) / 100.0)
+        risk = p["entry"] - p["stop"]
         # a second scan appends nothing (one trigger per id)
         run(["rvol", "--source", "massive", "--symbols", "UPP,DWN", "--now", "2026-10-19 09:41", "--record-dir",
              self.rec])
         with open(os.path.join(self.rec, "triggers.jsonl")) as fh:
             self.assertEqual(len(fh.readlines()), 1)
-        # scored after the close: the entry is bar 0 and the control's opening range is one bar (n_or 1)
+        # scored after the close: the buy-stop fills on bar 5 at its level; the stop is the fill minus the plan's risk
         s = synth.make_session(DAY, 7, start=30.6)
         s[0].update(o=30.0, h=31.0, l=29.8, c=30.6)
-        folder = os.path.join(self.d, "charts")
-        os.makedirs(folder)
-        with open(os.path.join(folder, "UPP.json"), "w") as fh:
-            fh.write(synth.chart_text("UPP", [s]))
-        got = record.score_day("2026-10-19", offline=folder, draws=1, now_utc=entry.parse_now("2026-10-19 16:30"),
-                               record_dir=self.rec)
+        for b in s[1:5]:
+            b.update(h=min(b["h"], 30.99))
+        s[5].update(o=30.95, h=31.2, l=30.94, c=31.1)
+        got = record.score_day("2026-10-19", offline=self.chart(s), draws=1,
+                               now_utc=entry.parse_now("2026-10-19 16:30"), record_dir=self.rec)
         self.assertEqual(got["pending"], 0)
         with open(os.path.join(self.rec, "scores.jsonl")) as fh:
             scores = [json.loads(x) for x in fh]
         with open(os.path.join(self.rec, "triggers.jsonl")) as fh:
             ctrl = [json.loads(x) for x in fh if '"control"' in x]
-        self.assertEqual(scores[0]["entry_bar"], 0)
-        self.assertEqual(scores[0]["last_bar"], 76)
-        self.assertEqual(ctrl[0]["control"]["n_or"], 1)
-        self.assertGreaterEqual(ctrl[0]["control"]["bar_index"], 1)
+        sc = scores[0]
+        self.assertEqual((sc["entry_bar"], sc["fill"], sc["level"], sc["last_bar"]), (5, 31.01, 31.01, 76))
+        self.assertAlmostEqual(sc["stop"], 31.01 - risk)
+        self.assertNotEqual((sc["outcome"], sc["exit_bar"]), ("stop", 5))  # bar 5's low is over the stop
+        c = ctrl[0]["control"]
+        self.assertEqual(c["n_or"], 1)
+        self.assertTrue(1 <= c["bar_index"] <= 71)                        # inside the order's own window
+        self.assertEqual(c["entry_until"], 71)
+
+    def chart(self, session, name="UPP"):
+        folder = os.path.join(self.d, "charts-%d" % len(os.listdir(self.d)))
+        os.makedirs(folder)
+        with open(os.path.join(folder, name + ".json"), "w") as fh:
+            fh.write(synth.chart_text(name, [session]))
+        return folder
+
+    def test_an_order_no_bar_reaches_is_no_fill_once(self):
+        code, out, err = run(["rvol", "--source", "massive", "--symbols", "UPP", "--now", "2026-10-19 09:40",
+                              "--record-dir", self.rec])
+        self.assertEqual(code, 0, err)
+        s = synth.make_session(DAY, 7, start=30.6)
+        s[0].update(o=30.0, h=31.0, l=29.8, c=30.6)
+        for b in s[1:]:
+            b.update(h=min(b["h"], 31.0), o=min(b["o"], 31.0), c=min(b["c"], 31.0))
+        folder = self.chart(s)
+        got = record.score_day("2026-10-19", offline=folder, draws=1, now_utc=entry.parse_now("2026-10-19 16:30"),
+                               record_dir=self.rec)
+        self.assertIn("no_fill", " ".join(got["lines"]))
+        with open(os.path.join(self.rec, "scores.jsonl")) as fh:
+            scores = [json.loads(x) for x in fh]
+        self.assertEqual([(x["outcome"], x["level"], x["until_bar"]) for x in scores], [("no_fill", 31.01, 71)])
+        with open(os.path.join(self.rec, "triggers.jsonl")) as fh:
+            self.assertEqual(sum(1 for x in fh if '"control"' in x), 0)   # no control for an order that never filled
+        record.score_day("2026-10-19", offline=folder, draws=1, now_utc=entry.parse_now("2026-10-19 16:30"),
+                         record_dir=self.rec)
+        with open(os.path.join(self.rec, "scores.jsonl")) as fh:
+            self.assertEqual(len(fh.readlines()), 1)                     # scored once
+        doc = record.report_doc(record._measure("ledger").load(self.rec), DAY)
+        self.assertEqual(doc["paper"]["n"], 0)                            # never a trade in the gate
+        self.assertIn("1 no fill", "\n".join(record.report_lines(doc)))
 
     def test_a_plan_trader_exit_refuses_is_recorded_without_one(self):
         def quiet(client, cal, symbol, start, end):       # a 0.001 daily range: a tenth of it is under 0.05%
@@ -411,17 +470,20 @@ class Cli(unittest.TestCase):
         with open("cfg.json", "w") as fh:
             json.dump({"floors": {"min_price": 7, "min_adv_usd": 30000000, "min_avg_volume": 1500000}}, fh)
         floors, src = scan.rvol_floors(scan.read_config("cfg.json"), R)
-        self.assertEqual(floors, {"min_price": 7.0, "min_adv_usd": 3e7, "min_avg_volume": 1.5e6})
+        self.assertEqual(floors, {"min_price": 7.0, "min_adv_usd": 3e7, "min_avg_volume": 1.5e6,
+                                  "min_atr_usd": R.ATR_MIN})
         self.assertEqual(src, {"min_price": "floors.min_price", "min_adv_usd": "floors.min_adv_usd",
-                               "min_avg_volume": "floors.min_avg_volume"})
+                               "min_avg_volume": "floors.min_avg_volume",
+                               "min_atr_usd": "the default (no floors.min_atr_usd in the config)"})
         floors, src = scan.rvol_floors({"universe": {"min_price": 6}}, R)
-        self.assertEqual(floors, {"min_price": 6.0, "min_adv_usd": R.ADV_USD_MIN, "min_avg_volume": R.ADV_SH_MIN})
+        self.assertEqual(floors, {"min_price": 6.0, "min_adv_usd": R.ADV_USD_MIN, "min_avg_volume": R.ADV_SH_MIN,
+                                  "min_atr_usd": R.ATR_MIN})
         self.assertEqual(src["min_price"], "universe.min_price")
         with open(os.path.join(os.path.dirname(os.path.abspath(scan.__file__)), "..", "trader-budget",
                                "config.example.json")) as fh:
             ex = json.load(fh)
         self.assertEqual(scan.rvol_floors(ex, R)[0], {"min_price": R.P_MIN, "min_adv_usd": R.ADV_USD_MIN,
-                                                     "min_avg_volume": R.ADV_SH_MIN})
+                                                     "min_avg_volume": R.ADV_SH_MIN, "min_atr_usd": R.ATR_MIN})
 
 
 if __name__ == "__main__":

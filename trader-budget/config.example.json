@@ -14,6 +14,7 @@
     "min_price": 5,
     "min_adv_usd": 20000000,
     "min_avg_volume": 1000000,
+    "min_atr_usd": 0.5,
     "max_chase_pct": 0.5,
     "no_averaging_down": true
   },

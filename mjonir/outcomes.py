@@ -1,7 +1,7 @@
 """The ONE place a trade's outcome is computed (chunk 2). Stdlib only, Python 3.8 syntax.
 
     touch(o, h, l, stop, target, long, gap_fill)   one bar: ('stop', fill) | ('target', fill) | None
-    score_trade(bars, k, entry, stop, target, last, cost_r, fill, gap_fill, long)
+    score_trade(bars, k, entry, stop, target, last, cost_r, fill, gap_fill, long, check_entry_bar)
 
 The time machine's Monte Carlo loop, its history, the random-entry control, the baseline and (chunk 3)
 the forward record all call these two; nothing else compares a price with a stop or a target.
@@ -15,7 +15,10 @@ Rules, for a long (a short mirrors them):
   * the target fills at the target;
   * target None: only the stop or the close;
   * nothing hit by bar `last`: "close", out at that bar's close (fill="close") or at a price you pass
-    (fill=<float>, e.g. the daily bar's official close).
+    (fill=<float>, e.g. the daily bar's official close);
+  * check_entry_bar=True (a stop order filled INSIDE bar k, not at its close): bar k's own low is checked
+    against the stop first; a touch there is the stop, filled at the stop (the order of prints inside a bar
+    is unknown: the conservative call), exit_bar k, no gap, MFE 0. The default (False) is the path above.
 
 The touch margins (amendment b): over the bars after the entry up to the exit bar, how far the price
 went beyond the target (high - target for a long) and beyond the stop (stop - low for a long), in
@@ -51,8 +54,9 @@ def touch(o, h, l, stop, target, long=True, gap_fill="open"):
     return None
 
 
-def score_trade(bars, k, entry, stop, target, last, cost_r=0.0, fill="close", gap_fill="open", long=True):
-    """One trade entered at the close of bars[k], walked through bars[last]. Returns
+def score_trade(bars, k, entry, stop, target, last, cost_r=0.0, fill="close", gap_fill="open", long=True,
+                check_entry_bar=False):
+    """One trade entered at the close of bars[k] (or inside it: check_entry_bar), walked through bars[last]. Returns
     {outcome target|stop|close, exit_bar, exit_price, gross_r, net_r, cost_r, mfe_r, mae_r, gap,
      margin_target, margin_target_r, margin_stop, margin_stop_r, decision_margin_r, fragile}.
     R is per the entry's risk (entry - stop for a long); net_r = gross_r - cost_r (cost applied once)."""
@@ -70,7 +74,13 @@ def score_trade(bars, k, entry, stop, target, last, cost_r=0.0, fill="close", ga
     exit_bar = last
     hi = lo = None
     gap = False
-    for i in range(k + 1, last + 1):
+    if check_entry_bar:
+        o, h, l, c = ohlc(bars[k])
+        t = touch(entry, h, l, stop, None, long, "stop")     # the fill bar: no gap past the stop, the stop's price
+        if t is not None:
+            outcome, exit_price, exit_bar = t[0], t[1], k
+            hi, lo = (entry, l) if long else (h, entry)
+    for i in ([] if outcome is not None else range(k + 1, last + 1)):
         o, h, l, c = ohlc(bars[i])
         hi = h if hi is None else max(hi, h)
         lo = l if lo is None else min(lo, l)

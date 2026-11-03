@@ -29,8 +29,9 @@ bucket, ticker, open, close, volume, as the vendor printed it) and the reference
 scoring run reuses; nothing in counts-only reads a direction from the store.
 
 The scoring run (section 12): one pass per day file; the funnel (mjonir/rvol.py, the live scanner's own rules)
-on the as-of type list, the daily cache (unadjusted) and the first-bar store; the list L(D) and its fires; every
-outcome through mjonir.outcomes.score_trade, every cost through mjonir.costs.trade_cost_r, every control through
+on the as-of type list, the daily cache (unadjusted) and the first-bar store; the list L(D) and its orders (a
+buy-stop at the first bar's high plus a tick, filled through mjonir.rvol.stop_fill or no_fill, scored from the fill
+bucket with check_entry_bar; arm E keeps the 09:35 continuation); every outcome through mjonir.outcomes.score_trade, every cost through mjonir.costs.trade_cost_r, every control through
 mjonir.control.draw_controls, every interval through mjonir.stats.expectancy_ci / paired_delta_ci, every state
 through verdict_history / verdict_control. Arm A enters by trader-timemachine's rule_trade (upstream's ORB rule).
 One JSON line per fire, draw, arm trade and baseline trade goes to trader/data/rvol/<window>/<D>.jsonl; a
@@ -68,9 +69,10 @@ HOLDOUT_OUT = re.compile(r"^rvol_holdout_[^/\\]+\.md$")
 #: Section 4.1, written once (tests compare this table with the document).
 PARAMS = {
     "P_MIN": 5.00, "ADV_USD_MIN": 20000000.0, "ADV_SH_MIN": 1000000.0, "ADV_N": 20, "RVOL_N": 14, "ATR_N": 14,
-    "TOP_K": 20, "STOP_ATR_FRAC": 0.10, "RISK_FLOOR_PCT": 0.05, "FLAT_BY": "15:55", "FLAT_BY_EARLY": "12:55",
-    "GAP_GUARD": (0.4, 2.5), "COST_TIERS": [[100000000, 4], [30000000, 8], [0, 15]], "HALF_SPREAD": 3.0,
-    "COMMISSION": 1.00, "SHARES_BASIS_MAX_LOSS": 1000.0, "SLIP_X2": [[100000000, 8], [30000000, 16], [0, 30]],
+    "ATR_MIN": 0.50, "RVOL_MIN": 1.0, "TOP_K": 20, "STOP_ATR_FRAC": 0.10, "RISK_FLOOR_PCT": 0.05,
+    "FLAT_BY": "15:55", "FLAT_BY_EARLY": "12:55", "GAP_GUARD": (0.4, 2.5),
+    "COST_TIERS": [[100000000, 4], [30000000, 8], [0, 15]], "HALF_SPREAD": 3.0, "COMMISSION": 1.00,
+    "SHARES_BASIS_MAX_LOSS": 1000.0, "SLIP_X2": [[100000000, 8], [30000000, 16], [0, 30]],
     "CONTROL_K": 3, "SEED": 19, "DRAWS": 2000, "LEVEL": 0.95, "N_FLOOR": 40, "FRAGILE_R": 0.05, "TICK": 0.01,
     "ARM_TARGETS": (1.0, 2.0), "OR15_MIN": 15, "NO_ENTRIES_AFTER": "15:30", "NO_ENTRIES_AFTER_EARLY": "12:30",
     "GATE_N": 40, "GATE_DAYS": 180, "POSTHOC_GATE_DATE": "2027-02-04",
@@ -259,11 +261,9 @@ def _timemachine():
 
 
 def atr_of(rows, n):
-    """trader-exit daily_atr's arithmetic: the mean of n true ranges from the last n + 1 daily rows
-    (o, h, l, c, v), TR = max(high - low, |high - prior close|, |low - prior close|)."""
-    rows = rows[-(n + 1):]
-    trs = [max(r[1] - r[2], abs(r[1] - rows[i][3]), abs(r[2] - rows[i][3])) for i, r in enumerate(rows[1:])]
-    return sum(trs) / len(trs)
+    """trader-exit daily_atr's arithmetic (mjonir.rvol.atr_of, the one definition the floors also use): the mean
+    of n true ranges from the last n + 1 daily rows (o, h, l, c, v)."""
+    return _mj()["rvol"].atr_of(rows, n)
 
 
 def stop_of(entry, atr, frac=PARAMS["STOP_ATR_FRAC"], floor_pct=PARAMS["RISK_FLOOR_PCT"]):
@@ -310,7 +310,7 @@ class Study(object):
         self._daily, self._store, self._types = {}, {}, {}
         self.requests_this_run = 0
         self.floors = {"min_price": PARAMS["P_MIN"], "min_adv_usd": PARAMS["ADV_USD_MIN"],
-                       "min_avg_volume": PARAMS["ADV_SH_MIN"]}
+                       "min_avg_volume": PARAMS["ADV_SH_MIN"], "min_atr_usd": PARAMS["ATR_MIN"]}
         self.early_rule = set()
         for y in range(self.lo.year - 1, self.hi.year + 1):
             self.early_rule |= set(self.K.rule_early_closes(y))
@@ -575,13 +575,11 @@ class Study(object):
         def history(sym):
             return [(h.get(sym) or (None, None, None))[2] for h in hist]
         fb = dict((t, {"o": o, "h": None, "l": None, "c": c, "v": v}) for t, (o, c, v) in firsts.items())
-        elig, c2 = R.bar_stage(passed, fb, history, PARAMS["RVOL_N"], PARAMS["GAP_GUARD"], rows=rows)
+        elig, c2 = R.bar_stage(passed, fb, history, PARAMS["RVOL_N"], PARAMS["GAP_GUARD"], rows=rows,
+                               min_rvol=PARAMS["RVOL_MIN"])
         counts = dict(c1)
         counts.update(c2)
         counts["eligible"] = len(elig)
-        if rows:
-            for e in elig:
-                e["daily"] = passed[e["symbol"]]["rows"]
         return elig, counts, len(pop)
 
     # -- counts-only (section 10)
@@ -640,8 +638,9 @@ class Study(object):
                                      "min": min(per_session) if per_session else None,
                                      "max": max(per_session) if per_session else None},
             "exclusions_by_cause": causes,
-            "first_bar_coverage": (elig_total / float(elig_total + causes["rvol_history_short"])
-                                   if elig_total + causes["rvol_history_short"] else None),
+            "first_bar_coverage": ((elig_total + causes["below_rvol"])
+                                   / float(elig_total + causes["below_rvol"] + causes["rvol_history_short"])
+                                   if elig_total + causes["below_rvol"] + causes["rvol_history_short"] else None),
             "early_close_basis": early, "unlabelled_short_sessions": short, "refused_sessions": refused,
             "funnel_order": list(self.R.CAUSES), "name_days": name_days,
         }
@@ -680,15 +679,16 @@ class Study(object):
         seed, K_ = PARAMS["SEED"], PARAMS["CONTROL_K"]
         by_sym = dict((e["symbol"], e) for e in elig)
         head.update(eligible=len(elig), population=pop, funnel=counts, list=[r["symbol"] for r in listed],
-                    fires=sum(1 for r in listed if r["fire"]), flat_idx=flat_idx)
+                    orders=sum(1 for r in listed if r["fire"]), flat_idx=flat_idx)
         lines.append(head)
+        n_fills = 0
 
         def prep(sym):
             e = by_sym[sym]
             bars = [b for b in bars_of.get(sym, []) if b["i"] <= flat_idx]
             if not bars or bars[0]["i"] != 0:
                 return None
-            atr = atr_of(e["daily"], PARAMS["ATR_N"])
+            atr = e["atr"]
             model, tier = self.cost_model(e["adv_usd"], PARAMS["COST_TIERS"])
             return e, bars, atr, model, tier
         for e in elig:                                   # B1 and B2 (section 6.2)
@@ -740,38 +740,65 @@ class Study(object):
                 lines.append({"kind": "armA", "date": date, "symbol": sym, "fired": False, "skip": "or_incomplete"})
             if not r["fire"]:
                 continue
-            entry = bars[0]["c"]
+            # the order: a buy-stop at ENTRY_LEVEL, live from bucket 1 to ENTRY_UNTIL (section 4.5)
+            level = bars[0]["h"] + PARAMS["TICK"]
+            until = max(j for j in range(last + 1) if idx[j] <= nea_idx)
+            order = {"kind": "order", "date": date, "symbol": sym, "rank": r["rank"], "rvol": r["rvol"],
+                     "level": level, "until": until}
+            # arm E: the 09:35 continuation (the draft's former primary), on every order (section 5)
+            e0 = bars[0]["c"]
+            s0, r0, _ = stop_of(e0, atr)
+            res_e = O.score_trade(bars, 0, e0, s0, None, last, cost_fn(e0, r0), fill="close", gap_fill="open",
+                                  long=True)
+            lines.append(dict({"kind": "armE", "date": date, "symbol": sym}, **self._res(res_e, e0, s0)))
+            got, why = C.draw_controls(bars, sym, date, seed=seed, draws=K_, n_or=1, last=last, rule_entry=e0,
+                                       rule_stop=s0, target_r=None, cost_fn=cost_fn, gap_fill="open", long=True,
+                                       entry_until=None)
+            self._draws(lines, "E", date, sym, got, why)
+            filled = self.R.stop_fill(bars, level, 1, until)
+            if filled is None:
+                lines.append(dict(order, filled=False))
+                continue
+            k, entry = filled
+            n_fills += 1
+            lines.append(dict(order, filled=True, k=k, entry=entry))
             stop, risk, bound = stop_of(entry, atr)
             cr = cost_fn(entry, risk)
-            res = O.score_trade(bars, 0, entry, stop, None, last, cr, fill="close", gap_fill="open", long=True)
+            res = O.score_trade(bars, k, entry, stop, None, last, cr, fill="close", gap_fill="open", long=True,
+                                check_entry_bar=True)
             model2, tier2 = self.cost_model(e["adv_usd"], PARAMS["SLIP_X2"])
-            res2 = O.score_trade(bars, 0, entry, stop, None, last, costs.trade_cost_r(entry, risk, model2),
-                                 fill="close", gap_fill="open", long=True)
+            res2 = O.score_trade(bars, k, entry, stop, None, last, costs.trade_cost_r(entry, risk, model2),
+                                 fill="close", gap_fill="open", long=True, check_entry_bar=True)
             ticks = {}
             for name, shift in (("up", PARAMS["TICK"]), ("down", -PARAMS["TICK"])):
-                en = entry + shift
-                st, rk, _ = stop_of(en, atr)
-                ticks[name] = O.score_trade(bars, 0, en, st, None, last, cost_fn(en, rk), fill="close",
-                                            gap_fill="open", long=True)["outcome"]
-            fire = dict({"kind": "fire", "date": date, "symbol": sym, "rank": r["rank"], "rvol": r["rvol"],
-                         "atr": atr, "adv_usd": e["adv_usd"], "tier_bps": tier, "risk_floor_bound": bound,
-                         "missing_buckets": idx[last] - idx[0] != last, "exit_before_flat_by": idx[last] < flat_idx,
-                         "last": last, "early": early, "net_r_slip_x2": res2["net_r"], "cost_r_slip_x2": res2["cost_r"],
-                         "tick_up": ticks["up"], "tick_down": ticks["down"]}, **self._res(res, entry, stop))
-            lines.append(fire)
+                f2 = self.R.stop_fill(bars, level + shift, 1, until)       # the level a tick away, refilled
+                if f2 is None:
+                    ticks[name] = "no_fill"
+                    continue
+                st, rk, _ = stop_of(f2[1], atr)
+                ticks[name] = O.score_trade(bars, f2[0], f2[1], st, None, last, cost_fn(f2[1], rk), fill="close",
+                                            gap_fill="open", long=True, check_entry_bar=True)["outcome"]
+            fill = dict({"kind": "fill", "date": date, "symbol": sym, "rank": r["rank"], "rvol": r["rvol"], "k": k,
+                         "level": level, "atr": atr, "adv_usd": e["adv_usd"], "tier_bps": tier,
+                         "risk_floor_bound": bound, "missing_buckets": idx[last] - idx[0] != last,
+                         "exit_before_flat_by": idx[last] < flat_idx, "last": last, "early": early,
+                         "net_r_slip_x2": res2["net_r"], "cost_r_slip_x2": res2["cost_r"], "tick_up": ticks["up"],
+                         "tick_down": ticks["down"]}, **self._res(res, entry, stop))
+            lines.append(fill)
             got, why = C.draw_controls(bars, sym, date, seed=seed, draws=K_, n_or=1, last=last, rule_entry=entry,
                                        rule_stop=stop, target_r=None, cost_fn=cost_fn, gap_fill="open", long=True,
-                                       entry_until=None)
+                                       entry_until=until)
             self._draws(lines, "primary", date, sym, got, why)
             tb = max(PARAMS["ARM_TARGETS"])
-            resb = O.score_trade(bars, 0, entry, stop, entry + tb * risk, last, cr, fill="close", gap_fill="open",
-                                 long=True)
+            resb = O.score_trade(bars, k, entry, stop, entry + tb * risk, last, cr, fill="close", gap_fill="open",
+                                 long=True, check_entry_bar=True)
             lines.append(dict({"kind": "armB", "date": date, "symbol": sym, "target_r": tb},
                               **self._res(resb, entry, stop)))
             got, why = C.draw_controls(bars, sym, date, seed=seed, draws=K_, n_or=1, last=last, rule_entry=entry,
                                        rule_stop=stop, target_r=tb, cost_fn=cost_fn, gap_fill="open", long=True,
-                                       entry_until=None)
+                                       entry_until=until)
             self._draws(lines, "B", date, sym, got, why)
+        head["fills"] = n_fills
         return self._write_day(day, lines)
 
     @staticmethod
@@ -886,9 +913,11 @@ def criteria_counted(text):
 
 
 def aggregate(stats, rows, counted=("1", "2", "3", "4")):
-    """Every number the report prints (P12): the funnel, the fires, the verdicts, the four criteria."""
+    """Every number the report prints (P12): the funnel, the orders and their fills, the verdicts (over fills),
+    the four criteria."""
     sessions = [r for r in rows if r["kind"] == "session"]
-    fires = [r for r in rows if r["kind"] == "fire"]
+    orders = [r for r in rows if r["kind"] == "order"]
+    fires = [r for r in rows if r["kind"] == "fill"]
     draws = [r for r in rows if r["kind"] == "draw"]
     skips = [r for r in rows if r["kind"] == "draw_skip"]
     ok = [s for s in sessions if s["status"] == "ok"]
@@ -897,9 +926,12 @@ def aggregate(stats, rows, counted=("1", "2", "3", "4")):
         for k, v in s["funnel"].items():
             funnel[k] = funnel.get(k, 0) + v
     eligible = sorted(s["eligible"] for s in ok)
-    dist = {}
+    dist, fdist, nfdist = {}, {}, {}
     for s in ok:
-        dist[s["fires"]] = dist.get(s["fires"], 0) + 1
+        dist[s["orders"]] = dist.get(s["orders"], 0) + 1
+        fdist[s["fills"]] = fdist.get(s["fills"], 0) + 1
+        nf = s["orders"] - s["fills"]
+        nfdist[nf] = nfdist.get(nf, 0) + 1
     cost_mean = _cost_mean(fires)
     primary = stats.verdict_history(_hist(stats, fires, None), None, cost_mean)
     p_draws = [d for d in draws if d["arm"] == "primary"]
@@ -932,6 +964,11 @@ def aggregate(stats, rows, counted=("1", "2", "3", "4")):
                       "risk_floor_skips": sum(1 for r in rows if r["kind"] == "armA" and r.get("skip") == "risk_floor"
                                               and r.get("target_r") == tr),
                       "or_incomplete": sum(1 for r in rows if r["kind"] == "armA" and r.get("skip") == "or_incomplete")}
+    e_rows = [r for r in rows if r["kind"] == "armE"]
+    de = _delta(stats, e_rows, [x for x in draws if x["arm"] == "E"])
+    arms["E"] = {"n": len(e_rows), "history": stats.verdict_history(_hist(stats, e_rows, None), None,
+                                                                     _cost_mean(e_rows)),
+                 "control": stats.verdict_control(de), "delta": de, "by_year": by_year(stats, e_rows)[0]}
     b_rows = [r for r in rows if r["kind"] == "armB"]
     tb = max(PARAMS["ARM_TARGETS"])
     db = _delta(stats, b_rows, [x for x in draws if x["arm"] == "B"])
@@ -954,7 +991,13 @@ def aggregate(stats, rows, counted=("1", "2", "3", "4")):
                      "early_close_basis": dict((s["date"], s["basis"]) for s in sessions if s.get("early"))},
         "funnel": funnel,
         "eligible_per_session": {"median": _median(eligible), "q1": _q(eligible, 0.25), "q3": _q(eligible, 0.75)},
-        "fires": {"n": len(fires), "per_session": dict((str(k), v) for k, v in sorted(dist.items())),
+        "orders": {"n": len(orders), "filled": sum(1 for o in orders if o["filled"]),
+                   "no_fill": sum(1 for o in orders if not o["filled"]),
+                   "per_session": dict((str(k), v) for k, v in sorted(dist.items())),
+                   "no_fill_per_session": dict((str(k), v) for k, v in sorted(nfdist.items()))},
+        "fills": {"n": len(fires), "per_session": dict((str(k), v) for k, v in sorted(fdist.items())),
+                  "stopped_in_the_fill_bar": sum(1 for f in fires
+                                                 if f["outcome"] == "stop" and f["exit_bar"] == f["k"]),
                   "fragile": sum(1 for f in fires if f["fragile"]),
                   "missing_buckets": sum(1 for f in fires if f["missing_buckets"]),
                   "exit_before_flat_by": sum(1 for f in fires if f["exit_before_flat_by"]),
@@ -1005,19 +1048,25 @@ def report_text(agg, window, freeze_hash, runner_commit, argv):
          "Eligible names per session: median %s, quartiles %s and %s." % (
              a["eligible_per_session"]["median"], a["eligible_per_session"]["q1"], a["eligible_per_session"]["q3"]),
          "Exclusions by cause: %s." % ", ".join("%s %d" % (k, a["funnel"].get(k, 0)) for k in sorted(a["funnel"])),
-         "", "## Fires", "",
-         "%d fires; per session %s; fragile %d; missing_buckets %d; exit_before_flat_by %d; risk_floor_bound %d; "
-         "outcomes %s; mean round trip %.3f R; gross %s." % (
-             a["fires"]["n"], ", ".join("%s: %d" % kv for kv in a["fires"]["per_session"].items()),
-             a["fires"]["fragile"], a["fires"]["missing_buckets"], a["fires"]["exit_before_flat_by"],
-             a["fires"]["risk_floor_bound"], ", ".join("%s %d" % kv for kv in sorted(a["fires"]["outcomes"].items())),
-             a["fires"]["cost_r_mean"], _iv(a["fires"]["gross"])),
+         "", "## Orders and fills", "",
+         "%d orders (buy-stops at the first bar's high plus %.2f): %d filled, %d no_fill. Orders per session %s; "
+         "no_fill per session %s." % (
+             a["orders"]["n"], PARAMS["TICK"], a["orders"]["filled"], a["orders"]["no_fill"],
+             ", ".join("%s: %d" % kv for kv in a["orders"]["per_session"].items()),
+             ", ".join("%s: %d" % kv for kv in a["orders"]["no_fill_per_session"].items())),
+         "%d fills; per session %s; stopped in the fill bar %d; fragile %d; missing_buckets %d; exit_before_flat_by "
+         "%d; risk_floor_bound %d; outcomes %s; mean round trip %.3f R; gross %s." % (
+             a["fills"]["n"], ", ".join("%s: %d" % kv for kv in a["fills"]["per_session"].items()),
+             a["fills"]["stopped_in_the_fill_bar"], a["fills"]["fragile"], a["fills"]["missing_buckets"],
+             a["fills"]["exit_before_flat_by"], a["fills"]["risk_floor_bound"],
+             ", ".join("%s %d" % kv for kv in sorted(a["fills"]["outcomes"].items())),
+             a["fills"]["cost_r_mean"], _iv(a["fills"]["gross"])),
          "", "## The primary rule (criterion 1)", "", a["primary"]["text"], "",
          "## The matched random-entry control (criterion 2)", "", a["control"]["text"],
          "Control draws skipped: %s." % (", ".join("%s %d" % kv for kv in sorted(a["control_skipped"].items()))
                                          or "none"), "",
          "## The session-level interval (criterion 4)", "",
-         "One value a session with at least one fire (%d sessions); the template's fires are sessions here: %s"
+         "One value a session with at least one fill (%d sessions); the template's fires are sessions here: %s"
          % (a["session_level"]["n_sessions"], a["session_level"]["text"]), "",
          "## By year (arm D, criterion 3)", "", "| year | n | net mean [95%] | stop | close | fragile |",
          "| --- | --- | --- | --- | --- | --- |"]
@@ -1028,8 +1077,8 @@ def report_text(agg, window, freeze_hash, runner_commit, argv):
           "## Slippage sensitivity (arm C, never the headline)", "",
           "Tiers doubled: net %s." % _iv(a["slippage_x2"]), "",
           "## One-tick sensitivity", "",
-          "Entry %.2f up: %d flips; down: %d flips; of %d fires." % (a["one_tick"]["tick"], a["one_tick"]["up"],
-                                                                     a["one_tick"]["down"], a["one_tick"]["of"]),
+          "The level %.2f up, refilled: %d flips; down: %d flips (a flip to no_fill included); of %d fills."
+          % (a["one_tick"]["tick"], a["one_tick"]["up"], a["one_tick"]["down"], a["one_tick"]["of"]),
           "", "## Arms (reported, never promoted)", ""]
     for name in sorted(a["arms"]):
         v = a["arms"][name]

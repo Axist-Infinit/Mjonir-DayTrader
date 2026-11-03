@@ -66,7 +66,7 @@ class Derive(unittest.TestCase):
             self.assertEqual(lim[k], v, k)
         self.assertEqual(lim["warnings"], [])
         self.assertEqual(lim["floors"], {"min_price": 5.0, "min_adv_usd": 2e7, "min_avg_volume": 1e6,
-                                         "max_chase_pct": 0.5, "no_averaging_down": True})
+                                         "min_atr_usd": 0.5, "max_chase_pct": 0.5, "no_averaging_down": True})
 
     def test_the_example_has_no_equity_figure_and_keeps_upstreams_keys(self):
         c = example()

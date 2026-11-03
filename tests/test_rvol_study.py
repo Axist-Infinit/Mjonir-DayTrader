@@ -528,6 +528,10 @@ class Pieces(Market):
         self.assertEqual((P["P_MIN"], P["ADV_USD_MIN"], P["ADV_SH_MIN"], P["ADV_N"], P["RVOL_N"], P["ATR_N"]),
                          (R.P_MIN, R.ADV_USD_MIN, R.ADV_SH_MIN, R.ADV_N, R.RVOL_N, 14))
         self.assertEqual((P["TOP_K"], tuple(P["GAP_GUARD"])), (R.TOP_K, R.GAP_GUARD))
+        self.assertEqual((P["ATR_MIN"], P["RVOL_MIN"], P["TICK"]), (R.ATR_MIN, R.RVOL_MIN, R.TICK))
+        for k, v in (("ATR_MIN", "0.50 USD"), ("RVOL_MIN", "1.0"), ("ENTRY_LEVEL", "the first bar's high plus `TICK`"),
+                     ("ENTRY_UNTIL", "the `NO_ENTRIES_AFTER` bucket: index 71 on a full session, 35 on an early")):
+            self.assertTrue(table[k].startswith(v), (k, table[k]))
         self.assertEqual(P["COST_TIERS"], CO.DEFAULTS["slippage_tiers_bps"])
         self.assertEqual(P["SLIP_X2"], [[f, 2 * b] for f, b in CO.DEFAULTS["slippage_tiers_bps"]])
         self.assertEqual((P["HALF_SPREAD"], P["COMMISSION"]), (CO.DEFAULTS["default_half_spread_bps"],
@@ -627,7 +631,7 @@ class Window(Market):
         self.assertEqual(code, 0, err)
         with open(out[:-3] + ".json") as fh:
             side = json.load(fh)
-        for k in ("sessions", "funnel", "eligible_per_session", "fires", "primary", "control", "delta",
+        for k in ("sessions", "funnel", "eligible_per_session", "orders", "fills", "primary", "control", "delta",
                   "session_level", "by_year", "by_year_note", "slippage_x2", "one_tick", "arms", "baselines", "data",
                   "criteria", "criteria_counted", "result", "freeze_hash", "runner_commit", "command", "window"):
             self.assertIn(k, side)
@@ -635,20 +639,26 @@ class Window(Market):
         self.assertEqual(side["data"], {"source": "flatfile", "adjusted": False})
         self.assertEqual(side["sessions"]["warmup"], 14)
         self.assertEqual(side["sessions"]["early_close_basis"], {EARLY.isoformat(): "verified"})
-        self.assertEqual(sorted(side["arms"]), ["A1", "A2", "B"])
+        self.assertEqual(sorted(side["arms"]), ["A1", "A2", "B", "E"])
         self.assertEqual(sorted(side["criteria"]), ["1", "2", "3", "4"])
         self.assertIn(side["result"], ("pass", "closed"))
-        self.assertGreater(side["fires"]["n"], 0)
-        self.assertLessEqual(max(int(k) for k in side["fires"]["per_session"]), 20)
+        o = side["orders"]
+        self.assertGreater(side["fills"]["n"], 0)
+        self.assertEqual((o["filled"], o["filled"] + o["no_fill"]), (side["fills"]["n"], o["n"]))
+        self.assertGreater(o["no_fill"], 0)
+        self.assertLessEqual(max(int(k) for k in o["per_session"]), 20)
+        self.assertEqual(side["arms"]["E"]["n"], o["n"])               # the continuation on every order
+        self.assertEqual(side["arms"]["B"]["n"], side["fills"]["n"])   # arm B on the fills
         self.assertEqual(side["primary"]["text"], S.verdict_history(
-            {"triggered": side["fires"]["n"], "target": 0, "stop": side["fires"]["outcomes"]["stop"],
+            {"triggered": side["fills"]["n"], "target": 0, "stop": side["fills"]["outcomes"]["stop"],
              "expectancy": dict(side["primary"], n=side["primary"]["n"], mean=side["primary"]["mean"])},
-            None, side["fires"]["cost_r_mean"])["text"])
+            None, side["fills"]["cost_r_mean"])["text"])
         with open(out) as fh:
             doc = fh.read()
         self.assertEqual(S.banned_words(doc), [])
         self.assertNotIn("\u2014", doc)
-        for head in ("Availability funnel", "## Fires", "criterion 1", "criterion 2", "criterion 4", "By year",
+        for head in ("Availability funnel", "## Orders and fills", "criterion 1",
+                     "criterion 2", "criterion 4", "By year",
                      "Slippage", "One-tick", "Arms", "Baselines", "## Data", "criteria of section 8", "Result:"):
             self.assertIn(head, doc)
         # the per-session lines: every fire scored once, three draws or a counted skip each
@@ -656,11 +666,22 @@ class Window(Market):
         for f in sorted(os.listdir(os.path.join(data, "rvol", "dev"))):
             with open(os.path.join(data, "rvol", "dev", f)) as fh:
                 rows += [json.loads(x) for x in fh]
-        fires = [r for r in rows if r["kind"] == "fire"]
+        fires = [r for r in rows if r["kind"] == "fill"]
+        orders = dict(((r["date"], r["symbol"]), r) for r in rows if r["kind"] == "order")
         draws = [r for r in rows if r["kind"] == "draw" and r["arm"] == "primary"]
         skips = sum(sum(r["why"].values()) for r in rows if r["kind"] == "draw_skip" and r["arm"] == "primary")
         self.assertEqual(len(draws) + skips, 3 * len(fires))
         self.assertTrue(all(f["date"] != EARLY.isoformat() or f["last"] <= 40 for f in fires))
+        for f in fires:                       # the fill: bucket 1 to the cancel bucket, at max(level, its open)
+            od = orders[(f["date"], f["symbol"])]
+            self.assertTrue(od["filled"] and 1 <= f["k"] <= od["until"] <= (71 if f["date"] != EARLY.isoformat()
+                                                                             else 35))
+            self.assertGreaterEqual(f["entry"], f["level"])
+        by = dict(((d["date"], d["symbol"]), []) for d in draws)
+        for d in draws:
+            by[(d["date"], d["symbol"])].append(d)
+        for (date, sym), ds in by.items():    # every primary control inside the order's own window
+            self.assertTrue(all(1 <= d["bar"] <= orders[(date, sym)]["until"] for d in ds))
         # the same inputs, a fresh data folder: the same sidecar, byte for byte
         with open(out[:-3] + ".json", "rb") as fh:
             first = fh.read()

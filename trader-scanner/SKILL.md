@@ -221,13 +221,21 @@ freezes it, and nothing in the list says a name will move. Narrate the keys of
 - Stage 1 (`stage1`): live, one market snapshot sends `stage1.shortlist` names to stage 2;
   a replay has no snapshot and `stage1.basis` says so.
 - The list (`rows[]`): the `params.top` names with the highest `rvol` (the first bar's
-  volume over its mean across the `params.lookback` sessions before), `rank` whatever the
-  bar did, ties by ticker; `direction` is up, down or doji; `fire` is true only for an up
-  bar; `fires` lists them in rank order. `volume_x` is the stage-1 ratio.
-- The fires join `trader/watchlist.json` as setup `rvol_orb5`. With `--record` (the
-  default) a live scan made soon after the bar records each fire in the forward record
-  with the prereg's plan (trader-exit's daily-ATR stop, no target, out at the flat-by);
-  a replay or a late scan records nothing, and says so on stderr.
+  volume over its mean across the `params.lookback` sessions before; a name under
+  `params.min_rvol` is out, `funnel.below_rvol`, and a daily ATR under the config's floor
+  is out, `funnel.below_atr`), `rank` whatever the bar did, ties by ticker; `direction`
+  is up, down or doji; `fire` is true only for an up bar; `fires` lists them in rank order.
+  `volume_x` is the stage-1 ratio.
+- An up bar is an ORDER, not a trade: a buy-stop at `level` (the bar's high plus
+  `params.tick`), live until the config's `no_entries_after`. It is a trade only if a later
+  bar reaches `level`; the scan cannot know that, so say "an order at `level`", never "a
+  fill". The orders join `trader/watchlist.json` as setup `rvol_orb5` with `trigger.level`
+  and `trigger.until`. With `--record` (the default) a live scan made soon after the bar
+  records each order ARMED in the forward record with the prereg's plan (trader-exit's
+  daily-ATR stop, no target, out at the flat-by); `record.py score` reads the fill after
+  the close (the bar that reached `level`, at `level` or that bar's open if it opened
+  past it) or writes `no_fill`, which never counts as a trade. A replay or a late scan
+  records nothing, and says so on stderr.
 - Always say `live_vs_study` and `note` with the list: the live list can differ from the
   study's on a few names a day, and it is a hypothesis under test.
 

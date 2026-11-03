@@ -291,7 +291,9 @@ def build_trigger(doc, plan, plan_basis, decision, now_utc, window, bars_label, 
         "rule": rule, "rule_hash": rh,
         "trigger": {"time": t, "bar_index": doc.get("bar_index"), "price": doc.get("price"),
                     "or_high": orr.get("high"), "or_low": orr.get("low"), "level": doc.get("level"),
-                    "volume_x": extra.get("volume_x"), "rvol": extra.get("rvol")},
+                    "volume_x": extra.get("volume_x"), "rvol": extra.get("rvol"),
+                    "order": ({"type": "buy_stop", "level": doc.get("level"), "cancel_at": doc.get("cancel_at")}
+                              if doc.get("status") == "armed" else None)},
         "plan": None if plan is None else plan_part(plan, plan_basis),
         "plan_note": None if plan is not None else plan_basis,
         "costs": card, "costs_basis": card_basis,
@@ -311,8 +313,8 @@ def record_trigger(doc, plan=None, decision=None, config=None, source="yahoo", n
     """Append one trigger row, once. A plan for another symbol or day is not used (noted); without one the
     rule's default plan is built by trader-exit. Returns {state appended|exists|decided|skipped, id, message}."""
     ledger = _measure("ledger")
-    if doc.get("status") != "triggered":
-        return {"state": "skipped", "id": None, "message": "not recorded: %s is %s, not triggered"
+    if doc.get("status") not in ("triggered", "armed"):
+        return {"state": "skipped", "id": None, "message": "not recorded: %s is %s, not triggered or armed"
                 % (doc.get("symbol"), doc.get("status"))}
     now_utc = now_utc or parse_now(now_text)
     notes = []
@@ -572,7 +574,7 @@ def _score_day(day, source, offline, draws, now_utc, state_path, record_dir, sym
                 out["appended"]["scores"] += 1
                 out["lines"].append("%s: no plan to score (%s): written as no_data." % (label, t.get("plan_note")))
             continue
-        if have_score and (book["scores"][t["id"]].get("outcome") == "no_data"
+        if have_score and (book["scores"][t["id"]].get("outcome") in ("no_data", "no_fill")
                            or all(c in book["ids"] and c in book["scores"] for c in cids)):
             out["lines"].append("%s: already scored (%s, net %+.3f R); nothing appended." % (
                 label, book["scores"][t["id"]].get("outcome"), float(book["scores"][t["id"]].get("net_r") or 0)))
@@ -589,8 +591,9 @@ def _score_day(day, source, offline, draws, now_utc, state_path, record_dir, sym
             out["lines"].append("%s: unverified, not scored: %s" % (label, got))
             continue
         slots, info = got
+        order = (t.get("trigger") or {}).get("order")
         k = plan.get("entry_bar")
-        k = int((t.get("trigger") or {}).get("bar_index") if k is None else k)
+        k = 0 if order else int((t.get("trigger") or {}).get("bar_index") if k is None else k)
         last = last_bar(plan.get("flat_by"), info["early"])
         missing = [i for i in range(0, last + 1) if i not in slots]
         if missing and session_over(day, now_utc, info["early"]):
@@ -625,15 +628,39 @@ def _score_day(day, source, offline, draws, now_utc, state_path, record_dir, sym
         entry, stop, target = float(plan["entry"]), float(plan["stop"]), plan.get("target")
         target = None if target is None else float(target)
         model = costs.model_of(t.get("costs"))
+        rule = t.get("rule") or {}
+        eu = entry_until(order.get("cancel_at") if order else rule.get("no_entries_after"), info["early"])
+        if order:      # an armed buy-stop: its fill, resolved now from the bars after the order (mjonir.rvol.stop_fill)
+            filled = _measure("rvol").stop_fill(seq, float(order["level"]), 1, min(eu, last))
+            if filled is None:
+                if not have_score:
+                    ledger.append_rows(sp, [{"schema": 1, "id": t["id"], "kind": "trigger", "paired_id": None,
+                                             "scored_at": iso(now_utc), "date": t.get("date"),
+                                             "symbol": t.get("symbol"), "outcome": "no_fill",
+                                             "level": float(order["level"]), "until_bar": eu,
+                                             "reason": "no bar from 1 to %d reached the buy-stop at %.4f"
+                                                       % (min(eu, last), float(order["level"])),
+                                             "fill_basis": "paper", "broker": None}])
+                    out["appended"]["scores"] += 1
+                    out["lines"].append("%s: no_fill, no bar reached the buy-stop at %.2f by bar %d." % (
+                        label, float(order["level"]), min(eu, last)))
+                continue
+            risk = entry - stop                      # the plan's risk distance, kept from the fill
+            k, entry = filled
+            stop = entry - risk
+            if target is not None and plan.get("target_r") is not None:
+                target = entry + float(plan["target_r"]) * risk
 
         def cost_fn(e, r, model=model):
             return costs.trade_cost_r(e, r, model)
         if not have_score:
             res = outcomes.score_trade(seq, k, entry, stop, target, last, cost_fn(entry, entry - stop),
-                                       fill="close", gap_fill="open", long=True)
+                                       fill="close", gap_fill="open", long=True, check_entry_bar=bool(order))
             row = _score_row("trigger", t["id"], t, res, k, last, info, now_utc)
+            if order:
+                row.update(fill=_r6(entry), level=float(order["level"]), stop=_r6(stop))
             trig_c = seq[k]["c"]
-            if abs(trig_c - float((t.get("trigger") or {}).get("price") or trig_c)) > 0.02:
+            if not order and abs(trig_c - float((t.get("trigger") or {}).get("price") or trig_c)) > 0.02:
                 row["note"] = ("the trigger bar's close here is %.4f, the trigger said %.2f (another source or "
                                "vendor)" % (trig_c, float(t["trigger"]["price"])))
             dec = ledger.decision_of(book, t)
@@ -652,9 +679,7 @@ def _score_day(day, source, offline, draws, now_utc, state_path, record_dir, sym
             out["lines"].append("%s: %s." % (label, words))
         if not cids:
             continue
-        rule = t.get("rule") or {}
         n_or = int(rule.get("or_minutes") or 15) // 5
-        eu = entry_until(rule.get("no_entries_after"), info["early"])
         tr = plan.get("target_r")
         tr = None if target is None or tr is None else float(tr)
         got_c, why = control.draw_controls(seq, t["symbol"], t["date"], SEED, len(cids), n_or, last, entry, stop, tr,
@@ -823,8 +848,9 @@ def report_lines(doc):
         out.append("Filtered: setup %s, since %s, rule %s." % (f["setup"] or "any", f["since"] or "the start",
                                                                f.get("rule") or "any"))
     oc = c["outcomes"]
-    out.append("Triggers: %d recorded; scored %d target, %d stop, %d close; %d no data; %d not scored yet." % (
+    out.append("Triggers: %d recorded; scored %d target, %d stop, %d close; %d no data;%s %d not scored yet." % (
         c["triggers"], oc.get("target", 0), oc.get("stop", 0), oc.get("close", 0), oc.get("no_data", 0),
+        (" %d no fill (an armed order never reached);" % oc["no_fill"]) if oc.get("no_fill") else "",
         oc.get("not scored", 0)))
     d = c["decisions"]
     out.append("Decisions: %d taken, %d skipped, %d undecided. Controls: %d rows." % (

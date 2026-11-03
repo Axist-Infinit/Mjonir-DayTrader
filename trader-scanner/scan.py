@@ -1126,7 +1126,7 @@ def rvol_floors(cfg, R):
     uni = cfg.get("universe") if isinstance(cfg.get("universe"), dict) else {}
     out, src = {}, {}
     for key, uni_key, default in (("min_price", "min_price", R.P_MIN), ("min_adv_usd", "min_adv_usd", R.ADV_USD_MIN),
-                                  ("min_avg_volume", None, R.ADV_SH_MIN)):
+                                  ("min_avg_volume", None, R.ADV_SH_MIN), ("min_atr_usd", None, R.ATR_MIN)):
         if fl.get(key) is not None:
             v, where = fl[key], "floors.%s" % key
         elif uni_key and uni.get(uni_key) is not None:
@@ -1157,16 +1157,19 @@ def rvol_symbols(a):
     return out
 
 
-def rvol_entry_doc(r, day, now):
-    """The trigger the forward record takes for one fire: trader-entry's contract shape (trader/entry.json), an
-    entry at the close of the 9:30 bar (bar 0) with that bar as a 5-minute opening range (so n_or = 1)."""
+def rvol_entry_doc(r, day, now, cancel_at):
+    """The order the forward record takes for one up first bar (docs/PREREG_RVOL_ORB.md section 4.5): ARMED at
+    9:35, a buy-stop at the 9:30 bar's high plus a tick (`level`), cancelled at `cancel_at`; no fill yet, so no
+    bar index (trader-record resolves the fill when it scores after the close). The 9:30 bar is the 5-minute
+    opening range (so n_or = 1). trader-entry's contract shape otherwise."""
     fb = r["first_bar"]
     return {"created_by": "trader-scanner", "symbol": r["symbol"], "setup": RVOL_SETUP, "side": "buy",
-            "date": day.isoformat(), "status": "triggered", "time": "09:35", "bar_start": "09:30", "bar_index": 0,
-            "price": fb["c"], "level": None, "interval": "%dm" % BAR_MIN,
+            "date": day.isoformat(), "status": "armed", "time": "09:35", "bar_start": None, "bar_index": None,
+            "price": r["level"], "level": r["level"], "cancel_at": cancel_at, "interval": "%dm" % BAR_MIN,
             "opening_range": {"high": fb["h"], "low": fb["l"], "minutes": BAR_MIN}, "source": SOURCE,
             "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "reason": "rank %d of the RVOL list; its 9:30 bar closed above its open" % r["rank"]}
+            "reason": "rank %d of the RVOL list; its 9:30 bar closed above its open: a buy-stop at its high plus a "
+                      "tick" % r["rank"]}
 
 
 def _record_module():
@@ -1182,9 +1185,9 @@ def _record_module():
 
 
 def rvol_record(a, doc, day, now, local, live):
-    """--record: each fire into the forward record, once (trader-record), with the prereg's plan built by
-    trader-exit. A replay, or a live scan made after 9:45 AM, records nothing (the record takes no hindsight).
-    Returns the lines it says (stderr)."""
+    """--record: each order into the forward record, armed, once (trader-record), with the prereg's plan built by
+    trader-exit at the order's level. A replay, or a live scan made after 9:45 AM, records nothing (the record
+    takes no hindsight). Returns the lines it says (stderr)."""
     rows = [r for r in doc["rows"] if r["fire"]]
     if not a.record:
         return []
@@ -1194,10 +1197,11 @@ def rvol_record(a, doc, day, now, local, live):
         return ["record: not recorded: the scan ran at %s ET, after %s; the record takes a 9:35 entry only from a "
                 "scan made by then." % (clock_label(local), clock_label(RVOL_RECORD_BY))]
     out = []
+    cancel_at = str(read_config(a.config).get("no_entries_after") or "15:30")
     for r in rows:
         try:
             got = _record_module().record_trigger(
-                rvol_entry_doc(r, day, now), None, None, a.config, SOURCE, now, a.now, bars_label=SOURCE,
+                rvol_entry_doc(r, day, now, cancel_at), None, None, a.config, SOURCE, now, a.now, bars_label=SOURCE,
                 extra={"rvol": r["rvol"], "volume_x": r.get("volume_x")}, record_dir=a.record_dir)
             out.append("record: %s" % got["message"])
         except Exception as e:   # noqa: the record is a side effect of the scan, never its failure
@@ -1205,7 +1209,7 @@ def rvol_record(a, doc, day, now, local, live):
     return out
 
 
-def merge_watchlist(path, doc, now):
+def merge_watchlist(path, doc, now, cancel_at="15:30"):
     """The fires into the watchlist as rvol_orb5 hits, beside the hits already there (the daily scan's): an earlier
     rvol tag or hit is dropped first, so the file holds today's list only."""
     old = None
@@ -1226,6 +1230,7 @@ def merge_watchlist(path, doc, now):
             continue
         h = dict(h, setups=tags)
         h.pop("rvol", None)
+        h.pop("rvol_trigger", None)
         if h.get("setup") == RVOL_SETUP:
             h.pop("setup")
         hits.append(h)
@@ -1235,13 +1240,15 @@ def merge_watchlist(path, doc, now):
         if not r["fire"]:
             continue
         tag = {"rank": r["rank"], "rvol": round(r["rvol"], 4), "date": doc["date"]}
+        trig = {"type": "buy_stop", "level": round(r["level"], 4), "until": cancel_at}
         h = by.get(r["symbol"])
         if h is None:
             hits.append({"symbol": r["symbol"], "setups": [RVOL_SETUP], "setup": RVOL_SETUP,
-                         "price": round(r["first_bar"]["c"], 2), "rvol": tag})
+                         "price": round(r["first_bar"]["c"], 2), "rvol": tag, "trigger": trig})
         else:
             h["setups"] = h["setups"] + [RVOL_SETUP]
             h["rvol"] = tag
+            h["rvol_trigger"] = trig
         added += 1
     out = dict(old) if old else {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                                  "mode": "rvol", "source": SOURCE, "note": NOTE}
@@ -1252,15 +1259,15 @@ def merge_watchlist(path, doc, now):
 
 
 def _rule_floor(floors, src):
-    keys = ("min_price", "min_adv_usd", "min_avg_volume")
+    keys = ("min_price", "min_adv_usd", "min_avg_volume", "min_atr_usd")
     if all(src[k].startswith("floors.") for k in keys):
         where = "the config's floors block"
     else:
         where = "; ".join("%s from %s" % (k, "the default" if src[k].startswith("the default") else src[k])
                           for k in keys)
-    return ("price $%s+, ADV $%s+ and %s+ shares a day (%s)"
+    return ("price $%s+, ADV $%s+, %s+ shares a day and a daily ATR of $%s+ (%s)"
             % (_n(floors["min_price"]), "{:,.0f}".format(floors["min_adv_usd"]),
-               "{:,.0f}".format(floors["min_avg_volume"]), where))
+               "{:,.0f}".format(floors["min_avg_volume"]), "%.2f" % floors["min_atr_usd"], where))
 
 
 def cmd_rvol(a):
@@ -1291,7 +1298,7 @@ def cmd_rvol(a):
     if not a.no_write:
         doc["_path"] = a.write
         write_json(a.write, dict((k, v) for k, v in doc.items() if k != "_path"))
-        merge_watchlist(a.watchlist_out, doc, now)
+        merge_watchlist(a.watchlist_out, doc, now, str(read_config(a.config).get("no_entries_after") or "15:30"))
     doc.pop("_path", None)
     lines = rvol_record(a, doc, day, now, local, live)
     for ln in lines:
@@ -1323,12 +1330,14 @@ def cmd_rvol(a):
         "{:,}".format(f["eligible"]), ", ".join("%s %s" % (k.replace("_", " "), "{:,}".format(f[k]))
                                                for k in R.BAR_CAUSES + ("fetch_failed",))))
     if doc["rows"]:
-        print("  rank  symbol   RVOL      9:30 bar   close")
+        print("  rank  symbol   RVOL      9:30 bar   close     order (buy-stop)")
         for r in doc["rows"][:a.show]:
-            print("  %4d  %-6s %8.2f  %-9s %8s" % (r["rank"], r["symbol"], r["rvol"], r["direction"],
-                                                   _p(r["first_bar"]["c"])))
-        print("%d of the %d closed their 9:30 bar above its open (the fires, setup %s)%s"
-              % (len(doc["fires"]), len(doc["rows"]), RVOL_SETUP,
+            print("  %4d  %-6s %8.2f  %-9s %8s  %s" % (r["rank"], r["symbol"], r["rvol"], r["direction"],
+                                                       _p(r["first_bar"]["c"]),
+                                                       ("at %s" % _p(r["level"])) if r["fire"] else "none"))
+        print("%d of the %d closed their 9:30 bar above its open: %d orders (setup %s), each a buy-stop at its 9:30 "
+              "high plus a tick, live until no_entries_after; a fill is read when the record scores the day%s"
+              % (len(doc["fires"]), len(doc["rows"]), len(doc["fires"]), RVOL_SETUP,
                  (": " + ", ".join(doc["fires"]) + ".") if doc["fires"] else "."))
     else:
         print("No eligible name: the list is empty.")

@@ -115,6 +115,35 @@ class Score(unittest.TestCase):
         self.assertEqual((r["outcome"], r["gross_r"]), ("close", 0.0))
 
 
+class EntryBar(unittest.TestCase):
+    """check_entry_bar: a stop order filled INSIDE bar k (docs/PREREG_RVOL_ORB.md section 4.5)."""
+
+    def test_a_touch_in_the_fill_bar_is_the_stop_at_the_stop(self):
+        bars = [bar(100, 101, 99.5, 100.5), bar(100.6, 101.5, 99.9, 101.2), bar(101, 103, 100.9, 102)]
+        r = O.score_trade(bars, 1, 101.01, 100.0, None, 2, 0.1, check_entry_bar=True)
+        self.assertEqual((r["outcome"], r["exit_price"], r["exit_bar"], r["gap"]), ("stop", 100.0, 1, False))
+        self.assertAlmostEqual(r["gross_r"], -1.0)
+        self.assertAlmostEqual(r["net_r"], -1.1)
+        self.assertEqual(r["mfe_r"], 0.0)
+        self.assertAlmostEqual(r["margin_stop"], 0.1)
+        # without the check, the same trade walks on from bar 2 (the default path, unchanged)
+        d = O.score_trade(bars, 1, 101.01, 100.0, None, 2, 0.1)
+        self.assertEqual((d["outcome"], d["exit_bar"]), ("close", 2))
+
+    def test_an_untouched_fill_bar_scores_exactly_as_the_default(self):
+        s = synth.make_session("2026-10-19", 4)
+        for k in (3, 10, 40):
+            e = s[k]["c"]
+            stop = min(b["l"] for b in s[k:k + 1]) - 0.05
+            a = O.score_trade(s, k, e, stop, e + 1.0, 77, 0.07, check_entry_bar=True)
+            self.assertEqual(a, O.score_trade(s, k, e, stop, e + 1.0, 77, 0.07))
+
+    def test_a_short_mirrors_it(self):
+        bars = [bar(100, 100.5, 99, 99.5), bar(99.4, 100.2, 98.5, 99), bar(99, 99.5, 97, 97.5)]
+        r = O.score_trade(bars, 1, 98.99, 100.0, None, 2, check_entry_bar=True, long=False)
+        self.assertEqual((r["outcome"], r["exit_price"], r["exit_bar"]), ("stop", 100.0, 1))
+
+
 class OnePlace(unittest.TestCase):
     def test_no_other_outcome_comparison(self):
         # the review's grep: nothing compares a price with the stop or the target outside outcomes.py
