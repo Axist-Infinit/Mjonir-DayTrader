@@ -23,6 +23,13 @@ work around the one moment that matters, your yes:
             --target none --exit close) always needs one: the ticket says so.
   log       prints today's decisions.
 
+approve and decline also write the decision into the forward record
+(trader-record/record.py, ${TRADER_RECORD_DIR:-record}): taken with the risk and
+broker fingerprints, the shares and the planned max loss, or skipped with your
+reply as the reason, against the trigger in trader/entry.json. --no-record skips
+it. The fills you type with `fill` are what `record.py score` reads for a taken
+trade's realized result (fill_basis broker).
+
     python3 ticket.py show                    # every order, READY or not
     python3 ticket.py show --index 1 --json   # one ticket as JSON
     python3 ticket.py approve --index 1 --reply "yes"
@@ -476,6 +483,31 @@ def log_fill(state_path, now, today, symbol, side, qty, price):
     write_json(state_path, state)
 
 
+# ---------------------------------------------------------------- the forward record
+
+_RECORD = []
+
+
+def _record(a, order, decision, today, now):
+    """The decision into the forward record (trader-record), against the trigger behind this order. Only for
+    an entry. Never fatal: the broker log above is already written; a failure is said in the output."""
+    if getattr(a, "no_record", False):
+        return None
+    try:
+        if not _RECORD:
+            import importlib.util
+            root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            spec = importlib.util.spec_from_file_location("trader_broker_record",
+                                                          os.path.join(root, "trader-record", "record.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _RECORD.append(mod)
+        got = _RECORD[0].decide(order, decision, today, now, a.entry, a.plan, a.config, None, a.record_dir)
+        return "Record: %s." % got["message"]
+    except Exception as e:   # noqa: the yes or no is logged already; the record says why it is missing
+        return "Record: NOT RECORDED: %s." % e
+
+
 # ---------------------------------------------------------------- commands
 
 def _clock(a):
@@ -543,6 +575,13 @@ def cmd_approve(a):
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
+    if rec["kind"] == "entry":
+        note = _record(a, order, {"taken": True, "reason": "approved", "reply": a.reply,
+                                  "risk_fingerprint": rv.get("fingerprint"), "broker_fingerprint": rec["fingerprint"],
+                                  "risk_verdict": rv.get("verdict"), "qty": _f(order.get("qty")), "max_loss_usd": loss,
+                                  "order_class": order_class_of(order), "decided_at": rec["at"]}, today, now)
+        if note:
+            print(note)
     if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
     else:
@@ -564,6 +603,13 @@ def cmd_decline(a):
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded: you said no to order %d (%s). Nothing was sent." % (a.index, plain(order)))
+    rv = risk_verdict(risk, rec["fingerprint"], today)[0]
+    if kind_of(order, rv) == "entry":
+        note = _record(a, order, {"taken": False, "reason": a.reply or "declined", "risk_fingerprint":
+                                  (rv or {}).get("fingerprint"), "broker_fingerprint": rec["fingerprint"],
+                                  "risk_verdict": (rv or {}).get("verdict"), "decided_at": rec["at"]}, today, now)
+        if note:
+            print(note)
     return 0
 
 
@@ -697,12 +743,21 @@ def main(argv=None):
     common(p)
     p.add_argument("--index", type=int)
     p.add_argument("--json", action="store_true")
+
+    def record(p):
+        p.add_argument("--entry", default="trader/entry.json", help="the trigger behind the order (forward record)")
+        p.add_argument("--plan", default="trader/plan.json", help="its plan (forward record)")
+        p.add_argument("--record-dir", help="default ${TRADER_RECORD_DIR:-record}")
+        p.add_argument("--no-record", action="store_true", help="do not write the decision into the forward record")
+
     p = sub.add_parser("approve", help="record the user's explicit yes for one order")
     common(p)
+    record(p)
     p.add_argument("--index", type=int, required=True)
     p.add_argument("--reply", required=True, help="the user's reply, word for word")
     p = sub.add_parser("decline", help="record a no")
     common(p)
+    record(p)
     p.add_argument("--index", type=int, required=True)
     p.add_argument("--reply")
     p = sub.add_parser("result", help="record what happened after the Allow once / Deny card")

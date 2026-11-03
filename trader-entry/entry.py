@@ -46,6 +46,11 @@ Data: Yahoo's free chart JSON (unofficial, can lag, bars not single trades)
   PATH/<TICKER>.json when PATH is a folder. Without --now, an offline file is
   read as of its own time (meta.regularMarketTime).
 
+The forward record (--record, on by default for check and watch): a trigger is
+appended once to record/triggers.jsonl (${TRADER_RECORD_DIR:-record}) by
+trader-record, with --plan PATH when you planned ahead, else trader-exit's
+defaults for the setup. --no-record turns it off. A note goes to stderr.
+
 Exit codes: check 0 = triggered, 1 = anything else or an error. watch 0 on a
 trigger, 1 otherwise. watchlist 0 when at least one symbol triggered.
 """
@@ -816,6 +821,36 @@ def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_err
 
 # ---------------------------------------------------------------- commands
 
+_RECORD = []
+
+
+def _record(a, res, now):
+    """--record (on by default): the trigger into the forward record (trader-record/record.py), once. The
+    record never stops the timer: a failure is said on stderr, loudly."""
+    try:
+        if not _RECORD:
+            import importlib.util
+            root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            spec = importlib.util.spec_from_file_location("trader_entry_record",
+                                                          os.path.join(root, "trader-record", "record.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _RECORD.append(mod)
+        plan = None
+        if getattr(a, "plan", None):
+            with open(a.plan, encoding="utf-8") as fh:
+                plan = json.load(fh)
+        t = res.get("trigger") or {}
+        got = _RECORD[0].record_trigger(entry_doc(res, now), plan, None, a.config, SOURCE, now, a.now,
+                                        bars_label="offline" if a.offline else SOURCE,
+                                        extra={"volume_x": t.get("volume_x"), "min_volume_x": res.get("min_volume_x")},
+                                        record_dir=getattr(a, "record_dir", None))
+        msg = got["message"]
+    except Exception as e:   # noqa: the record is a side effect of the timer, never its failure
+        msg = "NOT RECORDED: %s" % e
+    print("record: %s" % msg, file=sys.stderr, flush=True)
+
+
 def _opts(a, cfg):
     if a.side in ("sell", "short"):
         raise EntryError("v2 plans longs only: no short entries. Watch for a buy (--side buy) instead.")
@@ -847,6 +882,8 @@ def cmd_check(a):
     res = evaluate(chart, now, **opts)
     if a.write:
         write_json(a.write, entry_doc(res, now))
+    if a.record and res["status"] == "triggered":
+        _record(a, res, now)
     if a.json:
         print(json.dumps(public(res), indent=2))
     else:
@@ -884,6 +921,8 @@ def cmd_watch(a):
     def on_trigger(res, now):
         write_json(a.out, entry_doc(res, now))
         print("Wrote %s." % a.out, flush=True)
+        if a.record:
+            _record(a, res, now)
 
     def emit(line):
         print(line, flush=True)
@@ -962,15 +1001,24 @@ def main(argv=None):
         p.add_argument("--source", choices=["yahoo", "massive"], help="default yahoo; or export TRADER_SOURCE=massive")
         p.add_argument("--config", default="trader/config.json")
 
+    def record(p):
+        p.add_argument("--record", dest="record", action="store_true", default=True,
+                       help="append a trigger to the forward record (the default)")
+        p.add_argument("--no-record", dest="record", action="store_false", help="do not record the trigger")
+        p.add_argument("--plan", help="the plan to record the trigger with (default: trader-exit's defaults)")
+        p.add_argument("--record-dir", help="default ${TRADER_RECORD_DIR:-record}")
+
     p = sub.add_parser("check", help="the setup's status right now")
     p.add_argument("symbol")
     common(p)
+    record(p)
     p.add_argument("--write", nargs="?", const="trader/entry.json", metavar="PATH",
                    help="save the result (default trader/entry.json)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("watch", help="poll bar by bar until it triggers or expires")
     p.add_argument("symbol")
     common(p)
+    record(p)
     p.add_argument("--every", type=float, default=30, help="seconds between polls while Yahoo is behind")
     p.add_argument("--until", help="stop at this New York time (HH:MM)")
     p.add_argument("--out", default="trader/entry.json", help="where a trigger is written")
