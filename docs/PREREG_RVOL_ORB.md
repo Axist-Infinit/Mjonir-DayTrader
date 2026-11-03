@@ -25,8 +25,7 @@ Zarattini, Barbon and Aziz (2024), "A Profitable Day Trading Strategy For The U.
 
 Where this prereg's PRIMARY rule departs from the paper as read (the check changed no rule and no parameter below; each departure is the owner's call before the freeze):
 
-- Entry: the paper buys on a stop order at the first bar's high, whenever the session breaks it; section 4.5 buys at the first bar's close (09:35) on every up first bar of the list, whether or not the high is ever broken. These are different trades: the paper's is a breakout of the five-minute range, this prereg's is a continuation entry at 09:35. Arm B and the live record's 09:35 trigger follow section 4.5.
-- Floors: the paper reads the price floor on the day's opening price and the share-volume floor over 14 sessions, and also requires a 14-day ATR above 0.50 USD and a relative volume of at least 100 percent. Section 3.3 reads the price on the prior close, both liquidity floors over `ADV_N` sessions, adds the dollar floor `ADV_USD_MIN`, and has no ATR or relative-volume floor. So section 3.3's "the paper's own floor" holds for the 1,000,000 shares and not for the window, and section 4.4's list is built the paper's way (rank first, direction second) on different floors.
+- Floors: price read on the prior close, not the day's open; the share-volume window is `ADV_N` = 20 sessions, not 14; the dollar floor `ADV_USD_MIN` is added; the ATR is the simple mean of 14 true ranges (the paper's averaging is not stated).
 - Exit: 16:00 ET in the paper, `FLAT_BY` here (section 11 already states it).
 - Sizing and costs: the paper risks 1 percent of capital under a 4x leverage cap and charges only the per-share commission; here every result is in R at equal risk, net of the section 4.5 cost model.
 
@@ -74,7 +73,8 @@ From the daily cache rows of the ADV window (the `ADV_N` sessions strictly befor
 
 - price: the close of the session before D at or above `P_MIN`;
 - dollar liquidity: the mean of close times volume over the ADV window at or above `ADV_USD_MIN` (this same mean is the ADV used by the cost tier);
-- share liquidity: the mean of volume over the ADV window at or above `ADV_SH_MIN` (the paper's own floor, as recalled).
+- share liquidity: the mean of volume over the ADV window at or above `ADV_SH_MIN` (the paper's own floor, as recalled);
+- range: the ATR of section 4.5 (the simple mean of `ATR_N` true ranges from the last `ATR_N` + 1 rows of the ADV window) at or above `ATR_MIN`, else excluded and counted `below_atr` (the paper's ATR floor).
 
 No row of session D is read for eligibility. The day's own first bar enters only the ranking and the trade.
 
@@ -97,8 +97,12 @@ A second, loose guard for splits the reference table missed and for bad prints: 
 | `ADV_SH_MIN` | 1,000,000 shares (mean of volume over the ADV window) | eligibility |
 | `ADV_N` (the ADV window) | 20 sessions strictly before D | eligibility, split guard |
 | `RVOL_N` | 14 sessions strictly before D | the RVOL denominator |
+| `RVOL_MIN` | 1.0 (the first bar's volume at least its `RVOL_N`-session mean) | eligibility |
 | `ATR_N` | 14 daily true ranges, from 15 daily rows strictly before D | the stop |
+| `ATR_MIN` | 0.50 USD (the ATR of section 4.5) | eligibility |
 | `TOP_K` | 20 | the ranking |
+| `ENTRY_LEVEL` | the first bar's high plus `TICK`: a buy-stop placed at 09:35 | the entry |
+| `ENTRY_UNTIL` | the `NO_ENTRIES_AFTER` bucket: index 71 on a full session, 35 on an early close; the order is cancelled after it | the entry, the control |
 | `STOP_ATR_FRAC` | 0.10 | the stop |
 | `RISK_FLOOR_PCT` | 0.05 percent of the entry | the stop |
 | `FLAT_BY` | 15:55 ET; 12:55 ET on a 13:00 early close | the exit |
@@ -118,7 +122,7 @@ A second, loose guard for splits the reference table missed and for bad prints: 
 | `TICK` | 0.01 USD | the one-tick sensitivity |
 | `ARM_TARGETS` | 1R and 2R | the exploratory arms |
 | `OR15_MIN` | 15 minutes (three five-minute bars) | arm A |
-| `NO_ENTRIES_AFTER` | 15:30 ET; 12:30 ET on an early close (upstream's `entry.py` default) | arm A |
+| `NO_ENTRIES_AFTER` | 15:30 ET; 12:30 ET on an early close (upstream's `entry.py` default) | the entry window of the primary and of arm A, and the control |
 | `GATE_N`, `GATE_DAYS` | 40 resolved trades and 180 days (the house money gate) | the forward record |
 | `POSTHOC_GATE_DATE` | 2027-02-04 (the holdout's last session plus six months) | section 9 |
 
@@ -134,22 +138,23 @@ A missing bucket (no print in five minutes, a halt) is never padded. The walk us
 
 - The first bar is bucket index 0 (09:30:00 to 09:34:59 ET). It must be present with a positive volume and an open and a close, else the name-day is excluded and counted `no_first_bar`.
 - RVOL(D) = the first bar's volume on D divided by the mean of the first bar's volume over the `RVOL_N` sessions strictly before D. All `RVOL_N` prior first bars must be present with a positive volume, else excluded and counted `rvol_history_short`. The prior first-bar volumes come from the first-bar store the runner builds as it passes each day file (section 12): every ticker's index-0 bucket, persisted per session.
+- RVOL(D) must be at or above `RVOL_MIN`, else the name-day is excluded and counted `below_rvol` (the paper's floor: a name trading under its own usual opening volume is not in play).
 - The first `RVOL_N` sessions of the development window cannot have a full history (the minute files begin on the window's first session); they are warm-up, counted `warmup`, and no fire is possible on them. The holdout's history comes from the last sessions of the development window: inputs, never outcomes.
 - "Up" means the first bar's close strictly above its open on unrounded values. A doji is not up.
 
 ### 4.4 Ranking: the paper's construction
 
-Among the eligible names of D (sections 3.2 to 3.4 and 4.3), rank by RVOL descending, ties by ticker ascending, and take the first `TOP_K`: the day's "stocks in play" list L(D), direction-agnostic. The day's fires F(D) are the names in L(D) whose first bar is up. The paper ranks first and reads the direction from the bar second; a long-only arm of that strategy is the up subset of the same list, so the list here is the paper's. The alternative (the top `TOP_K` among up bars only) is a different and longer long list; it is not tested here. F(D) holds between zero and `TOP_K` fires; its distribution by session goes in the report.
+Among the eligible names of D (sections 3.2 to 3.4 and 4.3), rank by RVOL descending, ties by ticker ascending, and take the first `TOP_K`: the day's "stocks in play" list L(D), direction-agnostic. The day's orders F(D) are the names in L(D) whose first bar is up; each is a buy-stop at `ENTRY_LEVEL`, and the day's trades are the orders that fill (section 4.5). The paper ranks first and reads the direction from the bar second; a long-only arm of that strategy is the up subset of the same list, so the list here is the paper's. The alternative (the top `TOP_K` among up bars only) is a different and longer long list; it is not tested here. F(D) holds between zero and `TOP_K` orders; orders, fills and `no_fill` by session go in the report. Every verdict of section 8 is over fills.
 
 One trade per name per day, long only, equal risk per trade: every result is in R (the entry minus the stop is 1 R), never in dollars.
 
 ### 4.5 Entry, stop, exit, costs
 
-- Entry: the close of the first bar (index 0), unrounded: in `score_trade` terms, `k = 0`. The fill basis is the close of the latest minute inside the 09:30 bucket; its bias is stated in section 11.
+- Entry: a buy-stop at `ENTRY_LEVEL`, placed at 09:35 and cancelled at `ENTRY_UNTIL`. It fills on the first bucket k, from index 1 up to the `ENTRY_UNTIL` bucket, whose high is at or above `ENTRY_LEVEL`, at max(`ENTRY_LEVEL`, that bucket's open), unrounded: in `score_trade` terms `k` is the fill bucket. An order no bucket reaches is `no_fill`, counted, never scored. The fill's bias is stated in section 11.
 - Stop: entry minus risk, where risk = max(`STOP_ATR_FRAC` times ATR, `RISK_FLOOR_PCT` of the entry), unrounded (chunk 1 amendment e: arithmetic on unrounded values, rounding for display only; the desk's `exit.py` floors its stop to the cent and REFUSES a risk under the floor rather than widening it; the study widens and counts `risk_floor_bound` so that no name is dropped for a quiet ATR). A stop the floor sets is moved down by at most eight `nextafter` steps (units in the last place) so that `mjonir.control`'s own 0.05 percent check sees exactly the floor, not 0.0499999 by float rounding.
 - ATR: the simple mean of `ATR_N` daily true ranges, TR = max(high minus low, |high minus the prior close|, |low minus the prior close|), over the sessions strictly before D, exactly `exit.py daily_atr`'s arithmetic (the mean of n true ranges from n + 1 rows). Rows come from the daily cache (unadjusted, the same vendor as the minute bars; the split guard protects the lookback), not from the adjusted API. Why simple and not Wilder: it is what the desk's `datr:0.10` stop computes, so the study and the live desk agree, and it is reproducible from exactly `ATR_N` + 1 rows with no warm-up or seed.
 - Target: none (`target=None`).
-- Exit: `score_trade(bars, 0, entry, stop, None, last, cost_r, fill="close", gap_fill="open", long=True)`. The stop is checked first in every bar; a bar touching both counts as the stop; a bar that opens below the stop fills at its open; otherwise out at the close of bar `last`. `mfe_r`, `mae_r`, the touch margins and `fragile` are kept per fire.
+- Exit: `score_trade(bars, k, entry, stop, None, last, cost_r, fill="close", gap_fill="open", long=True, check_entry_bar=True)`. The stop is checked first in the fill bucket's own low after the fill (a touch there counts as the stop, filled at the stop: the order of prints inside a bucket is unknown, the conservative call) and in every later bar; a bar touching both counts as the stop; a bar that opens below the stop fills at its open; otherwise out at the close of bar `last`. `mfe_r`, `mae_r`, the touch margins and `fragile` are kept per fire.
 - Costs, charged once per trade: `cost_r = mjonir.costs.trade_cost_r(entry, risk, model)` with `model = {"per_side_bps": tier + HALF_SPREAD, "commission_usd": COMMISSION, "shares": None, "max_loss_usd": the SHARES_BASIS max loss}`, where `tier = mjonir.costs.tier_bps(ADV_USD, COST_TIERS)` on the name's own ADV window mean. The round trip is two sides priced at the entry plus two commissions spread over `SHARES_BASIS`; the notional cap on the live share count is not applied here (it only lowers the share count and raises the commission a share by under 0.01 R at these prices; stated, not modelled). A worked line of the model, not a result: for a name whose ATR is 3 percent of its price, the risk is 0.3 percent of the price, and a round trip of 14 bp (the best tier plus the default spread, twice) is about 0.47 R. Costs are a large fraction of R under a tenth-of-ATR stop; that is the point of a net test.
 
 ## 5. Exploratory arms (reported, never promoted)
@@ -157,7 +162,8 @@ One trade per name per day, long only, equal risk per trade: every result is in 
 Each arm runs on the same sessions, the same list L(D) or its up subset as stated, the same cost model, the same control machinery with its own entry window, the same intervals and verdict states. An arm's state is printed; no arm's state can promote it or any parameter of the primary. Promotion of an arm needs a new prereg.
 
 - Arm A, ORB-15 on the paper's list: the opening range is the first `OR15_MIN` of the session (buckets 0 to 2); the entry is the close of the first later bucket that closes above the range's highest high (upstream's ORB rule as `timemachine.rule_trade` applies it), no later than `NO_ENTRIES_AFTER`; the stop is the range midpoint (upstream's `or-mid`); two sub-arms, one per `ARM_TARGETS` multiple, exit at the target, the stop or the `FLAT_BY` close. Run on every name of L(D) regardless of its first bar's direction (the ORB rule supplies its own direction: long only, above the range).
-- Arm B, ORB-5 with a target: the primary's fires, entry and stop, with a target of the larger `ARM_TARGETS` multiple above the entry.
+- Arm B, ORB-5 with a target: the primary's fills, entry and stop, with a target of the larger `ARM_TARGETS` multiple above the executed entry.
+- Arm E, the 09:35 continuation: the orders' names entered at the first bar's close (`k = 0`) with the primary's stop rule, no target, no entry-bar check; its control draws from buckets 1 through `last` minus 1 (`entry_until=None`). This is the draft's former primary, kept so the breakout and the continuation are read side by side.
 - Arm C, the slippage sensitivity on the primary: the primary re-scored with `SLIP_X2`; printed beside the primary, never the headline, never a state.
 - Arm D, the by-year table of the primary (and of each arm): for each calendar year, `n`, the net mean, `lo`, `hi`, the stop share, the close share, the fragile count; the sign-flip note `timemachine._history_summary` prints.
 
@@ -167,7 +173,7 @@ Also reported for the primary, per chunk 1 amendments a to e: every average with
 
 ### 6.1 The matched random-entry control (sets a verdict state)
 
-For every fire: `CONTROL_K` draws from `mjonir.control.draw_controls(bars, symbol, date, seed=SEED, draws=CONTROL_K, n_or=1, last=last, rule_entry=entry, rule_stop=stop, target_r=None, cost_fn=cost_fn, gap_fill="open", long=True, entry_until=None)`. So: eligible bars are index 1 through `last` minus 1 (the 09:35 bucket through the bucket before the `FLAT_BY` bucket: the whole post-range session, because the rule's claim is that this name's 09:35 entry is special, and a control confined to the morning would share part of that claim); the generator is `control.session_rng(SEED, symbol, date)`, seeded by identifiers only; each draw enters at its bar's close with the rule's own risk as a percent of the entry (stop = the rule's stop times the draw's close over the rule's entry), no target, the same `last`, and `cost_fn` is the same cost model evaluated at the draw's entry and risk with the name's own tier. The eligible bars, `last` and every bar index here are positions in the list of buckets present (section 4.2: a missing bucket is never padded, so after a gap a position is not the clock's bucket index). Skips are counted (`risk_floor`, `no_eligible_bar`).
+For every fill: `CONTROL_K` draws from `mjonir.control.draw_controls(bars, symbol, date, seed=SEED, draws=CONTROL_K, n_or=1, last=last, rule_entry=entry, rule_stop=stop, target_r=None, cost_fn=cost_fn, gap_fill="open", long=True, entry_until=u)`, with u the `ENTRY_UNTIL` bucket. So: a control is drawn only for an order that filled, and it is the same trade moved in time: the same session and the same name; one bar drawn from 1 through min(u, `last` minus 1), the window the order itself could fill in, because the rule's claim is that the breakout bucket is special among those; entry at that bar's close with the fill's risk as a fraction of the entry (stop = the rule's stop times the draw's close over the rule's entry); no target, the same `last` and the same exit; and `cost_fn`, the same cost model evaluated at the draw's entry and risk with the name's own tier. The generator is `control.session_rng(SEED, symbol, date)`, seeded by identifiers only. The eligible bars, `last` and every bar index here are positions in the list of buckets present (section 4.2: a missing bucket is never padded, so after a gap a position is not the clock's bucket index). Skips are counted (`risk_floor`, `no_eligible_bar`).
 
 The delta: `paired_delta_ci({date: [net R of the day's fires]}, {date: [net R of the day's draws]}, SEED, DRAWS)`: per session, the mean rule net R minus the mean control net R; SESSIONS resampled, so a day's fires and draws stay paired and the twenty-way correlation of one open is inside the unit. The state: `verdict_control(delta)`, floored on the paired sessions at `N_FLOOR`.
 
@@ -209,7 +215,7 @@ Any state other than `pass` on any criterion on either window closes the hypothe
 
 - Development pass on all four: the lead asks the owner; with the owner's word the holdout runs once.
 - Development anything else: closed by postscript. An `unverified` by floor (too few fires) is closed as "cannot judge" and may be reopened only by a new prereg with a wider window or universe, never by widening this one.
-- Holdout pass on all four after a development pass: the rule enters the FORWARD RECORD as setup `rvol_orb5` through `scan.py rvol` and `trader-record` (plan 3.1, 3.4), paper only, taking a fire only from a live scan made by 09:45 ET (a `--date` replay never records), under the house money gate: at least `GATE_N` resolved trades AND at least `GATE_DAYS` days, the record's net expectancy interval above zero and its delta against the record's own matched control above zero. Never to money directly; the gate is not a forecast.
+- Holdout pass on all four after a development pass: the rule enters the FORWARD RECORD as setup `rvol_orb5` through `scan.py rvol` and `trader-record` (plan 3.1, 3.4), paper only, taking a fire only from a live scan made by 09:45 ET (a `--date` replay never records); the live record stores the armed order at 09:35 and resolves its fill when it scores after the close, under the house money gate: at least `GATE_N` resolved trades AND at least `GATE_DAYS` days, the record's net expectancy interval above zero and its delta against the record's own matched control above zero. Never to money directly; the gate is not a forecast.
 - Holdout anything else after a development pass: a fail; closed by postscript; the development pass is recorded as in-sample and nothing more.
 - A strong result on the WRONG side on either window (the rule below zero with the whole interval under zero, or behind its control with the whole interval under zero) is recorded as a kill with structure. Its mirror (fading the list) is post-hoc and is never registered: it gets a dated gate on unseen sessions after the holdout's last session, read no earlier than `POSTHOC_GATE_DATE`, and only under a new prereg.
 - Nothing in this document moves money. The forward record is the paper account.
@@ -317,7 +323,7 @@ Not read before the freeze: fires per session (it depends on the first bar's dir
 - No profit is claimed or promised, by this document, by the runner's output or by any review that cites it. A pass is a past sample under a stated model; the forward record and its gate are the only path onward, and the gate is not a forecast.
 - Shorts are not tested. The paper trades both sides; this pack is long only; the down half of every list is dropped, not scored.
 - Results are in R net of the stated cost model (`COST_TIERS`, `HALF_SPREAD`, `COMMISSION`, `SHARES_BASIS`), never in dollars; the spread is a default, not a measured NBBO, and may be low for the thinnest tier; halts, borrow, locates and partial fills are not modelled.
-- The fill at the first bar's close is an idealisation with a known direction of bias: a market order sent at 09:35:00 fills at or after the next print, through the spread, in a fast tape; on an up first bar the next print is more often above the close than below it, so the idealised entry flatters a long. The control shares the same fill convention, so the delta is less exposed than the expectancy; the live record (hand-entered fills, `fill_basis = broker`) is the measurement of this bias.
+- The fill of the buy-stop at max(`ENTRY_LEVEL`, the bucket's open) is an idealisation with a known direction of bias: a stop order becomes a market order when the level trades and fills at or after the next print, through the spread, in a tape that is by construction moving up through the level, so a real fill sits at or above the modelled one more often than below it, and a bucket whose high only touches the level may not have filled a real order at all; the idealised entry flatters a long. The control enters at its bar's close and does not share the stop-order convention, so the delta carries this bias too; the live record (hand-entered fills, `fill_basis = broker`) is the measurement of it.
 - The `FLAT_BY` exit is five minutes before the official close and uses the last bucket's close, not the closing auction; the paper holds to the close. A difference by design (the desk's own flat-by rule), stated.
 - The live list from `scan.py rvol` ranks a snapshot first and exact first bars second; it may differ from the study's list on a few names a day. The forward record tests the live list, not this study.
 - The paper's sample, universe, floors, costs and leverage are its own; only the construction of the list and the trade is taken from it. Agreement or disagreement with the paper's numbers is not a claim of replication.
