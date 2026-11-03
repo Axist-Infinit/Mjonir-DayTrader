@@ -48,6 +48,8 @@ class Wired(unittest.TestCase):
 
     def setUp(self):
         self.saved = {n: getattr(Y, n) for n in self.NAMES}
+        for n in self.NAMES:             # a fetcher a test does not serve fails on its own, naming itself
+            setattr(Y, n, self._unserved(n))
         self.calls = []
         self.cwd = os.getcwd()
         self.d = tempfile.mkdtemp()
@@ -58,6 +60,12 @@ class Wired(unittest.TestCase):
             setattr(Y, n, f)
         os.chdir(self.cwd)
         shutil.rmtree(self.d)
+
+    @staticmethod
+    def _unserved(name):
+        def raiser(*a, **kw):
+            raise AssertionError("unserved fetcher %s" % name)
+        return raiser
 
     def serve(self, name, value):
         def fake(*a, **kw):
@@ -156,6 +164,14 @@ class Entry(Wired):
         self.assertEqual((c1, c2), (0, 0), err)
         self.assertEqual(off.replace("Yahoo, free, can lag", "Massive").replace("a.json", "b.json"), mas)
         self.assertIn("10:10 bar  closed $364.18  TRIGGERED", mas)
+
+
+class Unserved(Wired):
+    def test_a_fetcher_no_test_served_fails_naming_itself(self):
+        for name in self.NAMES:
+            with self.assertRaises(AssertionError) as cm:
+                getattr(Y, name)()
+            self.assertEqual(str(cm.exception), "unserved fetcher %s" % name)
 
 
 class Exit(Wired):

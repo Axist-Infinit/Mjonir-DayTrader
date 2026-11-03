@@ -578,7 +578,10 @@ def daily_atr(sym, day, n=DATR_DAYS):
 
 def cost_inputs(sym, day, now_utc):
     """(adv_usd, adv_note, quote, quote_note) for the cost card. ADV$ and the NBBO come from Massive under
-    --source massive; otherwise ADV is unverified (the most expensive tier) and the spread is the default."""
+    --source massive; otherwise ADV is unverified (the most expensive tier) and the spread is the default.
+    The live quote is asked only when the plan's day is today by the --now clock (now_utc) AND by the real
+    clock: a replay pinned to a past --now never asks (the NBBO now says nothing about then), and a --now
+    of today asks the one quote there is."""
     if SOURCE != "massive":
         return None, "unverified: --source yahoo has no ADV (the most expensive tier)", None, \
             "no live quote under --source yahoo"
@@ -588,7 +591,7 @@ def cost_inputs(sym, day, now_utc):
         adv_note = "Massive: mean close x volume over the 20 sessions before %s" % day
     except PlanError as e:
         adv_note = "unverified: %s" % e
-    if day == to_eastern(utc_now()).date():
+    if day == to_eastern(now_utc).date() == to_eastern(utc_now()).date():
         quote = _mjonir().quote(sym)
         quote_note = "Massive NBBO" if quote else "unverified: Massive gave no quote"
     else:

@@ -142,6 +142,15 @@ class Repo(unittest.TestCase):
         self.assertIs(cfg.get("allow_short", False), False)
         self.assertIs(cfg.get("allow_margin", False), False)
 
+    def test_every_test_file_loads_the_hermetic_helpers(self):
+        # tests/_load.py hides the calendar, the source and the Massive key; tests/_mj.py builds on it
+        folder = os.path.join(ROOT, "tests")
+        for f in sorted(os.listdir(folder)):
+            if f.startswith("test_") and f.endswith(".py"):
+                with open(os.path.join(folder, f), encoding="utf-8") as fh:
+                    src = fh.read()
+                self.assertRegex(src, r"(?m)^(import _load|import _mj|from _load import|from _mj import)", f)
+
     def test_paper_trading_is_the_default(self):
         with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
             cfg = json.load(fh)

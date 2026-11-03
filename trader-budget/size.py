@@ -439,7 +439,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     rt = (slip_rt + 2.0 * commission / qty) if qty else slip_rt
     rr_net = None if reward_c is None else (reward_c / 100.0 - rt) / (risk + rt)
     basis = str(c.get("min_reward_risk_basis") or "net")
-    rr_check = rr_net if (costs_on and basis == "net") else (None if reward_c is None else reward_c / float(risk_c))
+    if basis not in ("net", "gross"):
+        raise SizeError("min_reward_risk_basis is net or gross, not %r" % c.get("min_reward_risk_basis"))
     notes_out = []
     refusal = None
     if qty == 0:

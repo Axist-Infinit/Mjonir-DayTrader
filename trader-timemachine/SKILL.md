@@ -94,12 +94,15 @@ bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
    interval. The baseline buys the close of the last opening-range bar on
    every session: a diagnostic, never a verdict.
 7. **The verdicts** are fixed templates (`verdict_history`, `verdict_control`,
-   each with `state` pass / fail / unverified). The history verdict compares
-   the decided target rate's Wilson interval with the net break-even,
-   (1 + cost R) / (target R + 1): 56.5 % at 1R with a 0.13 R round trip.
-   Under 40 decided fires it says "Cannot judge". A plan with no target is
-   judged on its net average R against 0. The control verdict passes only
-   when the delta's interval is above 0 with at least 40 decided fires.
+   each with `state` pass / fail / unverified). The history verdict reads
+   ONE statistic, the money gate's own: the 95 % bootstrap interval of the
+   net R over every fire, against 0. Under 40 fires it says "Cannot judge";
+   an interval holding 0 is "not distinguishable from zero"; wholly under 0
+   is "Below zero", wholly over 0 "Above zero". For a plan with a target the
+   decided rate and its Wilson interval follow as a diagnostic, against the
+   net break-even (1 + c) / (target R + 1) at the history's own mean round
+   trip c; it never sets the state. The control verdict reads the paired net
+   delta and needs 40 paired sessions.
 
 **The seed.** The draws come from Python's `random.Random(seed)`, seed 19 by
 default. Same plan, same data, same seed: the same numbers, on any machine.
@@ -121,11 +124,11 @@ grid). A live in-progress bar is never used.
    flat-by time. With a Massive key, `--source massive --years 2` reads two
    years instead of 60 days.
 3. Tell the user, in this order: the `verdict_history` text exactly as
-   printed, the `verdict_control` text exactly as printed, the net average R
-   with its interval and n, the decided count with its Wilson interval, the
-   fragile count and the one-tick flips. Then, if asked, the shape diagnostic
+   printed (it carries the net average with its interval and n, and the
+   decided count with its Wilson interval), the `verdict_control` text
+   exactly as printed, the fragile count and the one-tick flips. Then, if asked, the shape diagnostic
    line. Say the seed.
-4. If the verdict says "Cannot judge" or "not distinguishable", say so
+4. If the verdict says "Cannot judge", "not distinguishable" or "Below zero", say so
    plainly. Do not dress it up, and never read the shape diagnostic as odds.
 5. Say once that this is a measurement of past sessions, not a prediction.
    Earnings, news and halts can do things those sessions never did. Check
@@ -143,18 +146,18 @@ Upstream's 60 days of Yahoo bars, the 4 bp tier TSLA's ADV$ clears:
 Costs: 0.7599 a share round trip = 0.130 R (4 bp slippage tier, ...; 3 bp half spread, the default, unverified; $1 commission a side over 8 shares).
 History: the same rule ... on each of those 59 real sessions fired 33 times: 13 target, 15 stop, 5 neither.
 Average R, net of costs, -0.261 (95 % bootstrap interval -0.592 to +0.074, n 33).
-  Gross average R -0.062 (95 % bootstrap interval -0.392 to +0.263, n 33); costs 0.199 R a trade on average.
+  Gross average R -0.062 (95 % bootstrap interval -0.392 to +0.263, n 33); costs 0.199 R a trade on average (n 33).
   Decided: 13 of 28 hit the target first (46.4 %, 95 % Wilson 29.5 % to 64.2 %); 11 of the 28 decided by under 0.05 R (fragile).
   One-tick sensitivity: the entry 1 cent higher flips 1 outcome, 1 cent lower flips 0 (of 33).
-Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson [29.5%, 64.2%]); n is below the 40-fire floor. Net break-even at 1R after costs is 56.5%.
-Behind the random-entry control: net delta -0.293 R a trade (95% bootstrap [-0.581, -0.013]) over 33 paired sessions.
+Cannot judge: 33 fires, net average -0.261 R a trade (95% bootstrap [-0.592, +0.074]); n is below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, 95% Wilson [29.5%, 64.2%]) against a net break-even of 59.9% at 1R after costs (the history's own mean round trip, 0.199 R).
+Cannot judge against the random-entry control: net delta -0.293 R a trade (95% bootstrap [-0.581, -0.013]) over 33 paired sessions; 33 is below the 40-session floor.
 Shape diagnostic (unconditional per-slot bootstrap, not conditioned on the breakout, vol regimes mixed): target first 29.4 % vs stop first 25.5 %.
 ```
 
-Twenty-eight decided fires cannot tell a 46 % target rate from the 56.5 %
-the plan needs after costs: the interval runs from 29.5 % to 64.2 %. That is
-the honest answer for this setup, and it is what the user should hear before
-`/trader-budget` sizes anything.
+Thirty-three fires are under the 40-fire floor, and the net interval runs
+from -0.592 to +0.074 R a trade: it cannot judge. That is the honest answer
+for this setup, and it is what the user should hear before `/trader-budget`
+sizes anything.
 
 ## Rules
 

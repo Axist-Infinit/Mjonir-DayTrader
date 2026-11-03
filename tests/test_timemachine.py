@@ -134,8 +134,9 @@ class Reel(unittest.TestCase):
         self.assertEqual(self.doc["mc_shape"], SHAPE + "target first 29.4 % vs stop first 25.5 %.")
         self.assertNotIn("verdict", self.doc)
         self.assertEqual(self.doc["verdict_history"]["text"],
-                         "Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson [29.5%, 64.2%]); "
-                         "n is below the 40-fire floor. Net break-even at 1R with costs off is 50.0%.")
+                         "Cannot judge: 33 fires, net average -0.062 R a trade (95% bootstrap [-0.392, +0.263]); n is "
+                         "below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, 95% Wilson [29.5%, "
+                         "64.2%]) against a break-even of 50.0% at 1R with costs off.")
         # 1R breaks even at 50 % of the replays that hit one side; the reel's target got 53.6 %
         gap, share, even = tm.lean(self.doc["mc"])
         self.assertEqual((round(share, 3), even), (0.536, 0.5))

@@ -58,14 +58,15 @@ How the replays work (the reel's sim.py, same algorithm, same random draws):
      close of the last opening-range bar on every session). No average is
      printed without its 95 % bootstrap interval and n.
 
-The verdict reads the HISTORY, net of costs (mjonir.stats.verdict_history):
-the rule's decided fires (target or stop) and the 95 % Wilson interval of their
-target rate against the net break-even (1 + cost_r) / (target R + 1). Under 40
-decided fires it cannot judge; an interval around the break-even is not
-distinguishable from it; wholly under it fails, wholly over it passes ("A past
-sample is not a forward result."). A plan with no target reads the net
-expectancy interval against 0. verdict_control reads the paired net delta
-against the random entry. The Monte Carlo block is a SHAPE diagnostic only (an
+The verdict reads the HISTORY, net of costs (mjonir.stats.verdict_history),
+on the money gate's own statistic: the 95 % bootstrap interval of the net R
+over every fire, against 0. Under 40 fires it cannot judge; an interval holding
+0 is not distinguishable from zero; wholly under 0 fails, wholly over 0 passes
+("A past sample is not a forward result."). For a plan with a target the
+decided rate (target or stop) and its Wilson interval follow as a diagnostic,
+against the net break-even (1 + c) / (target R + 1) where c is the history's
+own mean round trip in R; it never sets the state. verdict_control reads the
+paired net delta against the random entry, floored at 40 paired sessions. The Monte Carlo block is a SHAPE diagnostic only (an
 unconditional per-slot bootstrap, not conditioned on the breakout, volatility
 regimes mixed): mc_shape_line() states its target-first and stop-first shares,
 with a note when more than 40 % hit neither, and no verdict reads it.
@@ -445,8 +446,10 @@ def pct(a, q):
 
 
 def simulate(pool, entry, stop, target, k, last, replays=10000, seed=19, window=2, side="buy", gap_fill="open"):
-    """Monte Carlo replays of bars k+1..last. Same draws and order as the reel's sim.py. Each bar's exit
-    comes from mjonir.outcomes.touch (the stop first; a bar opening through the stop fills at its open
+    """Monte Carlo replays of bars k+1..last. Same draws and order as the reel's sim.py. This loop is the
+    one caller that reuses mjonir.outcomes.touch() bar by bar instead of score_trade(): the bars are
+    drawn as it walks (the draws must stay in upstream's order), so there is no bar list to score. touch()
+    is score_trade()'s own per-bar rule (the stop first; a bar opening through the stop fills at its open
     under gap_fill "open", at the stop under "stop"). target None: only the stop or the close."""
     touch = _measure("outcomes").touch
     long = side == "buy"
@@ -1038,12 +1041,17 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
         history = {"sessions": len(hist_sessions), "triggered": 0, "rule": None, "trades": [],
                    "note": "skipped: the history replay knows the opening-range breakout (orb) only, "
                            "this plan's setup is %r" % plan["setup"]}
-    cost_r = card["cost_r"] if card else 0.0
+    # the break-even in the decided diagnostic is the history's OWN mean round trip (each trade was charged
+    # its own), else the plan card's, else 0
+    if history.get("cost_r_mean") is not None:
+        cost_r = history["cost_r_mean"]
+    else:
+        cost_r = card["cost_r"] if card else 0.0
     vh = stats.verdict_history({"target": history.get("target", 0), "stop": history.get("stop", 0),
                                 "triggered": history.get("triggered", 0), "expectancy": history.get("net")},
                                plan["target_r"], cost_r, costs_on=card is not None)
     ctrl = history.get("control") or {}
-    vc = stats.verdict_control(ctrl.get("delta"), (history.get("decided") or {}).get("n", 0))
+    vc = stats.verdict_control(ctrl.get("delta"))
     if not control_draws:
         vc = dict(vc, reason="off", text="Random-entry control: off (--control-draws 0).")
     last_bar = bars[-1]
@@ -1105,7 +1113,8 @@ def history_lines(doc):
                                                                  h["triggered"], h["target"], h["stop"], h["close"]))
     if on:
         out = [head + " Average R, net of costs, %s." % _iv(h["net"]),
-               "  Gross average R %s; costs %.3f R a trade on average." % (_iv(h["gross"]), h["cost_r_mean"])]
+               "  Gross average R %s; costs %.3f R a trade on average (n %d)."
+               % (_iv(h["gross"]), h["cost_r_mean"], h["triggered"])]
     else:
         out = [head + " Average R %s, costs off." % _iv(h["gross"])]
     frag = "%d of the %d decided by under %g R (fragile)" % (h["fragile"], h["decided"]["n"], 0.05)
@@ -1328,7 +1337,8 @@ def cmd_chart(a):
     else:
         doc = compute(a)
     print("\n".join(render_chart(doc)))
-    print("\n".join([(doc.get("verdict_history") or {}).get("text", ""), doc.get("mc_shape", "")]
+    print("\n".join([(doc.get("verdict_history") or {}).get("text", ""),
+                      (doc.get("verdict_control") or {}).get("text", ""), doc.get("mc_shape", "")]
                      + list(doc.get("mc_notes") or [])))
     return 0
 

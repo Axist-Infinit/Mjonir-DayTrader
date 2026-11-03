@@ -130,10 +130,17 @@ class TheReelNetOfCosts(unittest.TestCase):
 
     def test_the_history_verdict_cannot_judge(self):
         v = self.doc["verdict_history"]
-        self.assertEqual((v["state"], v["reason"], v["k"], v["n"]), ("unverified", "n_below_floor", 13, 28))
-        self.assertEqual(v["text"], "Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson "
-                                    "[29.5%, 64.2%]); n is below the 40-fire floor. Net break-even at 1R after "
-                                    "costs is 56.5%.")
+        self.assertEqual((v["state"], v["reason"], v["n"], v["decided"]["k"], v["decided"]["n"]),
+                         ("unverified", "n_below_floor", 33, 13, 28))
+        # the break-even uses the history's own mean round trip (0.199 R), not the plan card's 0.130 R
+        self.assertEqual(v["cost_r"], self.doc["history"]["cost_r_mean"])
+        self.assertEqual(v["text"], "Cannot judge: 33 fires, net average -0.261 R a trade (95% bootstrap [-0.592, "
+                                    "+0.074]); n is below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, "
+                                    "95% Wilson [29.5%, 64.2%]) against a net break-even of 59.9% at 1R after costs "
+                                    "(the history's own mean round trip, 0.199 R).")
+        self.assertEqual(self.doc["verdict_control"]["text"],
+                         "Cannot judge against the random-entry control: net delta -0.293 R a trade (95% bootstrap "
+                         "[-0.581, -0.013]) over 33 paired sessions; 33 is below the 40-session floor.")
         self.assertNotIn("verdict", self.doc)
         for key in ("verdict_history", "verdict_control"):
             self.assertEqual(S.banned_words(self.doc[key]["text"]), [], key)
@@ -159,6 +166,7 @@ class TheReelNetOfCosts(unittest.TestCase):
         self.assertIn("One-tick sensitivity: the entry 1 cent higher flips 1 outcome, 1 cent lower flips 0 (of 33).",
                       text)
         self.assertIn("decided by under 0.05 R (fragile)", text)
+        self.assertIn("R a trade on average (n 33).", text)
 
     def test_no_average_without_its_interval_and_n(self):
         import re
@@ -173,7 +181,7 @@ class TheReelNetOfCosts(unittest.TestCase):
         c = h["control"]
         self.assertEqual((c["draws"], c["trades"] + sum(c["skipped"].values())), (3, 3 * 33))
         self.assertEqual(c["delta"]["n_sessions"], c["sessions"])
-        self.assertEqual(self.doc["verdict_control"]["n_decided"], 28)
+        self.assertEqual(self.doc["verdict_control"]["n_sessions"], 33)
         self.assertIn(self.doc["verdict_control"]["state"], ("pass", "fail", "unverified"))
         b = h["baseline"]
         self.assertEqual(b["sessions"], 59)
@@ -188,6 +196,20 @@ class TheReelNetOfCosts(unittest.TestCase):
         self.assertEqual((d["source"], d["adjustment"]["adjusted"]), ("yahoo", None))
         self.assertEqual((d["early_close_used"], d["incomplete_dropped"]), ([], []))
         self.assertEqual(self.doc["source"], "yahoo")
+
+    def test_the_chart_prints_both_verdicts(self):
+        d = tempfile.mkdtemp()
+        try:
+            out = os.path.join(d, "tm.json")
+            with open(out, "w") as fh:
+                json.dump(self.doc, fh)
+            code, text, err = run(["chart", "--from", out])
+            self.assertEqual(code, 0, err)
+            lines = text.splitlines()
+            i = lines.index(self.doc["verdict_history"]["text"])
+            self.assertEqual(lines[i + 1:i + 3], [self.doc["verdict_control"]["text"], self.doc["mc_shape"]])
+        finally:
+            shutil.rmtree(d)
 
     def test_the_mc_is_a_shape_line(self):
         self.assertTrue(self.doc["mc_shape"].startswith(tm.SHAPE))

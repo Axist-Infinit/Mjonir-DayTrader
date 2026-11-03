@@ -39,7 +39,12 @@ os.environ["MJONIR_KALEX_5M"] = os.path.join(DATA_DIR, "no-kalex-store.sqlite3")
 os.environ["MJONIR_FLATFILE_DIR"] = os.path.join(DATA_DIR, "no-flatfiles")
 atexit.register(shutil.rmtree, DATA_DIR, True)
 
+from mjonir import config as C  # noqa: E402
 from mjonir import massive as M  # noqa: E402
+
+# tests/_load.py hid the key from the env layers; one still visible (a <repo>/.env?) stops the suite here
+if C.api_key():
+    raise RuntimeError("a Massive key is visible to the tests (a <repo>/.env?)")
 
 MFIX = os.path.join(FIX, "mjonir")
 FAKE_KEY = "k3yF4keV4lue0123456789ABCDEFghij"   # 32 mixed characters, like the real one; not a key

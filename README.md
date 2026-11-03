@@ -97,33 +97,48 @@ scripts; docs/reviews/chunk2.md has the commands and the full output.
   and $1 commission on each order over 8 shares, the round trip is $0.76 a
   share, 0.130 R.
 - **The 1R plan is refused.** Net reward:risk is (5.86 - 0.76) / (5.86 +
-  0.76) = 0.77, under the 1.0 minimum, so trader-exit refuses it (and
-  trader-risk blocks upstream's 8-share order: $59.37 at the stop net of
-  costs, over the $50 limit). The example moves to `--target 2R` (375.90):
-  2.0 gross, 1.66 net. trader-budget sizes it at 7 shares, because the $50
-  max loss now includes the round trip and both commissions ($46.59 at the
-  stop), and trader-risk passes it, with the spread unverified.
-- **The 60-day reading cannot judge.** On upstream's 60 days of Yahoo bars
-  the 1R rule fired 33 times: average R -0.261 net of costs (95 % bootstrap
-  interval -0.592 to +0.074, n 33; gross -0.062). 13 of 28 decided fires hit
-  the target (46.4 %, 95 % Wilson 29.5 % to 64.2 %) against a net break-even
-  of 56.5 %, and the verdict is the "Cannot judge" line: n is below the
-  40-fire floor. 11 of those 28 decisions cleared their level by under
-  0.05 R, and the entry one cent higher flips one outcome (2026-08-06). The
-  2R rule on the same 60 days: 3 of 20 decided fires hit the target, average
-  R -0.352 net (-0.678 to +0.017, n 33): cannot judge either.
+  0.76) = 0.77, under the 1.0 minimum, so trader-exit refuses it. trader-risk
+  also blocks upstream's 8-share order file: $59.37 at the stop net of costs,
+  over the $50 limit; that order carries no cost card, so trader-risk prices
+  it at the config's most expensive tier (15 bp plus the 3 bp half spread),
+  not TSLA's 4 bp. The example moves to `--target 2R` (375.90): 2.0 gross,
+  1.66 net. trader-budget sizes it at 7 shares, because the $50 max loss now
+  includes the round trip and both commissions ($46.59 at the stop), and
+  trader-risk passes it, with the spread unverified.
+- **How the verdict reads.** One statistic sets it, the money gate's own:
+  the 95 % bootstrap interval of the net R over every fire, against 0, with
+  a 40-fire floor. The decided rate (target or stop) and its Wilson interval
+  follow as a diagnostic, against the net break-even at the history's own
+  mean round trip; it never sets the verdict. The control verdict needs 40
+  paired sessions.
+- **The 60-day reading cannot judge.** On upstream's 60 days of Yahoo bars,
+  with ADV from Massive (the 4 bp tier), the 1R rule fired 33 times:
+  "Cannot judge: 33 fires, net average -0.261 R a trade (95% bootstrap
+  [-0.592, +0.074]); n is below the 40-fire floor." Gross it is -0.062. 13
+  of 28 decided fires hit the target (46.4 %, Wilson 29.5 % to 64.2 %)
+  against a net break-even of 59.9 % (the history's own mean round trip,
+  0.199 R: its trades risk less than the reel's 5.86, so each pays more R).
+  11 of those 28 decisions cleared their level by under 0.05 R, and the
+  entry one cent higher flips one outcome (2026-08-06). The control cannot
+  judge either: 33 paired sessions is under the 40-session floor. Without
+  Massive (the default Yahoo path) the ADV is unverified, every trade is
+  charged the most expensive tier (0.445 R on average), and the same 33
+  fires print -0.508. The 2R rule on the same 60 days, ADV from Massive:
+  net average -0.352 (-0.678 to +0.017, n 33), cannot judge; 3 of 20
+  decided against a 40.0 % net break-even.
 - **The two-year reading.** `timemachine.py run --source massive --years 2`
   (499 sessions, 2024-10-21 to 2026-10-16, five early closes scored to 1:00
-  PM): the 1R rule fired 285 times, average R -0.125 net of costs (95 %
-  bootstrap interval -0.235 to -0.016, n 285; gross +0.056, -0.055 to
-  +0.165). 130 of 246 decided fires hit the target (52.8 %, Wilson 46.6 % to
-  59.0 %), an interval that holds the 56.5 % net break-even: "not
-  distinguishable from break-even". Against random entries on the same 285
-  sessions the net delta is -0.052 R a trade (-0.165 to +0.061): "not
+  PM): "Below zero: 285 fires, net average -0.125 R a trade (95% bootstrap
+  [-0.235, -0.016]); the whole interval is under 0. Decided: 130 of 246 hit
+  the target (52.8%, 95% Wilson [46.6%, 59.0%]) against a net break-even of
+  59.1% at 1R after costs (the history's own mean round trip, 0.181 R)."
+  Gross it is +0.056 (-0.055 to +0.165). Against random entries on the same
+  285 sessions the net delta is -0.052 R a trade (-0.165 to +0.061): "not
   distinguishable from the random-entry control". The 2R rule over the same
-  two years: average R -0.093 net (-0.231 to +0.044, n 285), 61 of 192
-  decided (31.8 %, Wilson 25.6 % to 38.7 %, break-even 37.7 %), delta -0.071
-  (-0.216 to +0.068): not distinguishable from either.
+  two years: net average -0.093 (-0.231 to +0.044, n 285), "not
+  distinguishable from zero"; 61 of 192 decided (31.8 %, Wilson 25.6 % to
+  38.7 %) against a 39.4 % net break-even; delta -0.071 (-0.216 to +0.068),
+  not distinguishable from the control.
 
 That is one stock and one rule, measured on past sessions; it is not a
 forward result and it promises nothing. The size from the $100,000 notional
@@ -256,14 +271,13 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    round trip that is 0.77 reward to risk, and this fork refuses it. The
    target here is two times the risk, 375.90: 2.0 gross, 1.66 net.
 5. **`/trader-timemachine`** re-ran the same rule on the previous 59 real
-   sessions, net of costs: the 1R rule fired 33 times, 13 hit the target, 15
-   the stop, 5 neither, average R -0.261 (95 % interval -0.592 to +0.074,
-   n 33). Its verdict: "Cannot judge: 13 of 28 decided fires hit the target
-   (46.4%, 95% Wilson [29.5%, 64.2%]); n is below the 40-fire floor. Net
-   break-even at 1R after costs is 56.5%." For the 2R plan, 3 of 20 decided
-   fires hit the target against a 37.7 % net break-even: it cannot judge
-   either. Two years of Massive bars are not
-   distinguishable from break-even or from random entries either (above,
+   sessions, net of costs (ADV from Massive): the 1R rule fired 33 times, 13
+   hit the target, 15 the stop, 5 neither. Its verdict: "Cannot judge: 33
+   fires, net average -0.261 R a trade (95% bootstrap [-0.592, +0.074]); n is
+   below the 40-fire floor." The 2R plan's 60 days cannot judge either (net
+   -0.352, n 33). On two years of Massive bars the 1R rule's net interval is
+   under zero ("Below zero", -0.125, -0.235 to -0.016, n 285) and the 2R
+   rule's holds zero; neither is distinguishable from random entries (above,
    "The TSLA example, net of costs"). Its 10,000 replays of the rest of the
    day (seed 19) are a shape diagnostic only: target first 29.4 %, stop
    first 25.5 %, still open at the close 45.1 %. That is the point of

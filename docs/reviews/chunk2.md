@@ -474,3 +474,46 @@ round trip is 0.509 R of this plan's 1.09 risk.
 - **Not done here:** the $100,000 notional and percent sizing (chunk 3.2), the forward record (3.1), any
   Massive call in a test. No live call answered 403. `~/Odyssey`, `~/Kalex` and `~/Infinit` were only
   read (the two port sources, the key, the Kalex store's coverage and hash).
+
+## 7. Review fixes (2c)
+
+Review verdict: HOLD on one MUST, plus SHOULDs and NITs. One commit (2c) on `feat/c2-measure`. Suite after
+2c: 514 OK (about 13.5 s). The verdict texts quoted in sections 4.3, 4.4 and 6 are the pre-2c wording;
+the texts below supersede them. No live call was made for 2c: the two-year verdicts were recomputed from
+the stored run's own numbers (its net interval, counts, cost_r_mean and control delta).
+
+| item | change | pinned by |
+| --- | --- | --- |
+| 1 MUST | the break-even in the history verdict uses the history's own mean round trip (`history["cost_r_mean"]`, else the card's, else 0) and the text names it ("the history's own mean round trip, 0.181 R") | `test_timemachine_measure.TheReelNetOfCosts.test_the_history_verdict_cannot_judge` (`v["cost_r"] == history["cost_r_mean"]`, 59.9 % at 0.199 R); `test_mjonir_stats.Verdicts.test_the_two_year_reading` (59.1 % at 0.181 R) |
+| 2 SHOULD | `verdict_history` reads ONE statistic, the net expectancy interval over all fires against 0 (no_history, n_below_floor, below, above, straddles); the decided rate is appended as a diagnostic for a target plan and never sets the state; the target and no-target branches are one; templates T_NONE, T_FLOOR, T_BELOW, T_ABOVE, T_STRADDLE plus the decided line (and its costs-off and nothing-decided forms) | `test_mjonir_stats.Verdicts` (`test_the_reel_cannot_judge`, `test_the_two_year_reading` with the expected text verbatim, `test_the_states_come_from_the_expectancy_only`, `test_no_target_has_no_decided_line`, `test_banned_words`); `test_timemachine.Reel.test_the_verdict_says_coin_flip` re-pinned |
+| 3 SHOULD | `verdict_control(delta, floor)` floors on the bootstrap's own n (paired sessions), either sign; fail and pass say "the whole interval is under / over 0"; the rule's decided n is no longer an input | `test_mjonir_stats.Verdicts.test_control_verdict_is_floored_on_its_sessions` (33 sessions with hi < 0 reads "Cannot judge ... 33 is below the 40-session floor"); `TheReelNetOfCosts` (the reel's control text, `n_sessions` 33) |
+| 4 SHOULD | size.py raises SizeError unless `min_reward_risk_basis` is net or gross; the dead `rr_check` is deleted | `test_measure_scripts.Size.test_the_basis_must_be_net_or_gross` |
+| 5 SHOULD | tests/_mj.py stops the suite when `C.api_key()` sees a key (a `<repo>/.env`); `test_source_wiring.Wired.setUp` replaces every fetcher with a raiser ("unserved fetcher fetch_x") until a test serves it; test_repo checks every `tests/test_*.py` imports `_load` or `_mj` | `test_source_wiring.Unserved.test_a_fetcher_no_test_served_fails_naming_itself`; `test_repo.Repo.test_every_test_file_loads_the_hermetic_helpers`; every Wired test now runs with the raisers |
+| 6 SHOULD | README: the verdict rule explained; the two-year 1R reading quoted as "Below zero ... net break-even of 59.1% ... (the history's own mean round trip, 0.181 R)"; the $59.37 block named as priced at the most expensive tier because upstream's order file carries no cost card; "with ADV from Massive" beside -0.261 and the default Yahoo path's 0.445 R and -0.508; the 2R readings and the walkthrough step 5 under the new rule. `trader-timemachine/SKILL.md` describes the one-statistic verdict and quotes the new reel text | `test_mjonir_stats.Verdicts.test_the_two_year_reading` asserts the recomputed text appears verbatim in the README |
+| 7 NIT | `simulate()`'s docstring says it is the one caller that reuses `outcomes.touch()` bar by bar instead of `score_trade()` (the bars are drawn as it walks), and why | docstring |
+| 8 NIT | "costs X R a trade on average (n N)." | `TheReelNetOfCosts.test_fragile_and_one_tick` asserts "R a trade on average (n 33)." |
+| 9 NIT | exit.py asks the live NBBO only when the plan's day is today by the `--now` clock AND by the real clock: a replay's `--now` never asks the quote of now | `test_measure_scripts.ExitPlan.test_the_live_quote_follows_the_now_clock` (Massive served; no quote for a past `--now`, one quote for the real now) |
+| 10 NIT | `timemachine.py chart` prints `verdict_control` after `verdict_history`, then the shape line and its notes | `TheReelNetOfCosts.test_the_chart_prints_both_verdicts`; upstream's `Cli.test_chart` (`lines[-2:]`) unchanged |
+| 11, 12, 14 | left as they are (12 is a note for chunk 3) | |
+
+The verdicts as now printed:
+
+```text
+60 days, upstream's Yahoo bars, ADV from Massive (the stored 12,729,948,354: the 4 bp tier), the 1R reel plan
+Cannot judge: 33 fires, net average -0.261 R a trade (95% bootstrap [-0.592, +0.074]); n is below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, 95% Wilson [29.5%, 64.2%]) against a net break-even of 59.9% at 1R after costs (the history's own mean round trip, 0.199 R).
+Cannot judge against the random-entry control: net delta -0.293 R a trade (95% bootstrap [-0.581, -0.013]) over 33 paired sessions; 33 is below the 40-session floor.
+
+60 days, the default Yahoo path (ADV unverified: the most expensive tier)
+Cannot judge: 33 fires, net average -0.508 R a trade (95% bootstrap [-0.846, -0.161]); n is below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, 95% Wilson [29.5%, 64.2%]) against a net break-even of 72.3% at 1R after costs (the history's own mean round trip, 0.445 R).
+
+Two years (recomputed from the stored acceptance run), the 1R reel plan
+Below zero: 285 fires, net average -0.125 R a trade (95% bootstrap [-0.235, -0.016]); the whole interval is under 0. Decided: 130 of 246 hit the target (52.8%, 95% Wilson [46.6%, 59.0%]) against a net break-even of 59.1% at 1R after costs (the history's own mean round trip, 0.181 R).
+Not distinguishable from the random-entry control: net delta -0.052 R a trade (95% bootstrap [-0.165, +0.061]) over 285 paired sessions; the interval includes 0.
+
+The 2R plan (recomputed from the stored runs)
+60 days: Cannot judge: 33 fires, net average -0.352 R a trade (95% bootstrap [-0.678, +0.017]); n is below the 40-fire floor. Decided: 3 of 20 hit the target (15.0%, 95% Wilson [5.2%, 36.0%]) against a net break-even of 40.0% at 2R after costs (the history's own mean round trip, 0.199 R).
+Two years: Edge not distinguishable from zero: 285 fires, net average -0.093 R a trade (95% bootstrap [-0.231, +0.044]); the interval includes 0. Decided: 61 of 192 hit the target (31.8%, 95% Wilson [25.6%, 38.7%]) against a net break-even of 39.4% at 2R after costs (the history's own mean round trip, 0.181 R).
+```
+
+A note on item 2's costs-off form: with `--no-costs` the decided line reads "against a break-even of
+50.0% at 1R with costs off." (the "after costs ... mean round trip" wording would name a 0.000 R cost).

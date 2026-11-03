@@ -82,54 +82,89 @@ class Bootstrap(unittest.TestCase):
         self.assertEqual(d, S.paired_delta_ci(dict(reversed(list(rule.items()))), worse))   # order-free
 
 
-class Verdicts(unittest.TestCase):
-    def test_the_reel_cannot_judge(self):
-        v = S.verdict_history({"target": 13, "stop": 15, "triggered": 33}, 1.0, 0.13)
-        self.assertEqual((v["state"], v["reason"]), ("unverified", "n_below_floor"))
-        self.assertEqual(v["text"], "Cannot judge: 13 of 28 decided fires hit the target (46.4%, 95% Wilson "
-                                    "[29.5%, 64.2%]); n is below the 40-fire floor. Net break-even at 1R after "
-                                    "costs is 56.5%.")
+def ex(n, mean, lo, hi):
+    return {"n": n, "mean": mean, "lo": lo, "hi": hi}
 
-    def test_the_four_classes(self):
-        v = S.verdict_history({"target": 30, "stop": 30, "triggered": 70}, 1.0, 0.0)
-        self.assertEqual((v["state"], v["reason"]), ("unverified", "straddles"))
-        self.assertTrue(v["text"].startswith("Edge not distinguishable from break-even: 30 of 60"))
-        v = S.verdict_history({"target": 10, "stop": 50, "triggered": 60}, 1.0, 0.13)
+
+class Verdicts(unittest.TestCase):
+    """One statistic sets the history verdict: the net expectancy interval over every fire against 0. The
+    decided rate is a diagnostic appended for a plan with a target (review 2c)."""
+
+    def test_the_reel_cannot_judge(self):
+        v = S.verdict_history({"target": 13, "stop": 15, "triggered": 33,
+                               "expectancy": ex(33, -0.261, -0.592, 0.074)}, 1.0, 0.1986)
+        self.assertEqual((v["state"], v["reason"], v["n"]), ("unverified", "n_below_floor", 33))
+        self.assertEqual(v["text"], "Cannot judge: 33 fires, net average -0.261 R a trade (95% bootstrap [-0.592, "
+                                    "+0.074]); n is below the 40-fire floor. Decided: 13 of 28 hit the target (46.4%, "
+                                    "95% Wilson [29.5%, 64.2%]) against a net break-even of 59.9% at 1R after costs "
+                                    "(the history's own mean round trip, 0.199 R).")
+        self.assertEqual((v["decided"]["k"], v["decided"]["n"], round(v["decided"]["break_even"], 4)),
+                         (13, 28, 0.5993))
+
+    def test_the_two_year_reading(self):
+        # the stored two-year run's numbers (docs/reviews/chunk2.md 4.4), recomputed under the 2c rule
+        v = S.verdict_history({"target": 130, "stop": 116, "triggered": 285,
+                               "expectancy": ex(285, -0.12523, -0.23468, -0.01593)}, 1.0, 0.18140)
         self.assertEqual((v["state"], v["reason"]), ("fail", "below"))
-        self.assertTrue(v["text"].startswith("Below break-even: 10 of 60"))
-        v = S.verdict_history({"target": 50, "stop": 10, "triggered": 60}, 1.0, 0.13)
+        self.assertEqual(v["text"], "Below zero: 285 fires, net average -0.125 R a trade (95% bootstrap [-0.235, "
+                                    "-0.016]); the whole interval is under 0. Decided: 130 of 246 hit the target "
+                                    "(52.8%, 95% Wilson [46.6%, 59.0%]) against a net break-even of 59.1% at 1R after "
+                                    "costs (the history's own mean round trip, 0.181 R).")
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+            readme = " ".join(fh.read().split())
+        self.assertIn(v["text"], readme)                                  # the README quotes it verbatim
+
+    def test_the_states_come_from_the_expectancy_only(self):
+        # a decided rate far above its break-even does not pass a history whose net interval straddles 0
+        hist = {"target": 50, "stop": 10, "triggered": 80}
+        v = S.verdict_history(dict(hist, expectancy=ex(80, 0.05, -0.02, 0.12)), 1.0, 0.13)
+        self.assertEqual((v["state"], v["reason"]), ("unverified", "straddles"))
+        self.assertTrue(v["text"].startswith("Edge not distinguishable from zero: 80 fires"))
+        v = S.verdict_history(dict(hist, expectancy=ex(80, 0.2, 0.05, 0.35)), 1.0, 0.13)
         self.assertEqual((v["state"], v["reason"]), ("pass", "above"))
         self.assertTrue(v["text"].endswith("A past sample is not a forward result."))
-        v = S.verdict_history({"target": 0, "stop": 0, "triggered": 3}, 1.0, 0.13)
-        self.assertEqual((v["state"], v["reason"]), ("unverified", "no_history"))
-        self.assertIn("with costs off", S.verdict_history({"target": 1, "stop": 1, "triggered": 2}, 2.0, 0.0,
-                                                          costs_on=False)["text"])
-
-    def test_no_target_reads_the_net_expectancy(self):
-        ex = {"n": 45, "mean": 0.1, "lo": 0.02, "hi": 0.2}
-        v = S.verdict_history({"triggered": 45, "expectancy": ex}, None, 0.1)
-        self.assertEqual((v["state"], v["reason"]), ("pass", "above"))
-        v = S.verdict_history({"triggered": 45, "expectancy": dict(ex, lo=-0.1)}, None, 0.1)
-        self.assertEqual(v["reason"], "straddles")
-        v = S.verdict_history({"triggered": 45, "expectancy": dict(ex, mean=-0.2, lo=-0.3, hi=-0.1)}, None, 0.1)
+        v = S.verdict_history(dict(hist, expectancy=ex(80, -0.2, -0.35, -0.05)), 1.0, 0.13)
         self.assertEqual((v["state"], v["reason"]), ("fail", "below"))
-        v = S.verdict_history({"triggered": 12, "expectancy": dict(ex, n=12)}, None, 0.1)
-        self.assertEqual(v["reason"], "n_below_floor")
-        self.assertEqual(S.verdict_history({"triggered": 0, "expectancy": None}, None, 0.1)["reason"], "no_history")
+        self.assertTrue(v["text"].startswith("Below zero: 80 fires"))
+        self.assertEqual(S.verdict_history({"triggered": 0, "expectancy": None}, 1.0, 0.13)["text"],
+                         "Cannot judge: the rule never fired in this history.")
+        off = S.verdict_history(dict(hist, expectancy=ex(80, 0.2, 0.05, 0.35)), 2.0, 0.0, costs_on=False)
+        self.assertIn("against a break-even of 33.3% at 2R with costs off.", off["text"])
+        none = S.verdict_history({"target": 0, "stop": 0, "triggered": 5, "expectancy": ex(5, 0.1, -0.2, 0.4)},
+                                 1.0, 0.13)
+        self.assertTrue(none["text"].endswith(" No fire was decided; every one exited at the close."))
 
-    def test_control_verdict(self):
+    def test_no_target_has_no_decided_line(self):
+        v = S.verdict_history({"triggered": 45, "expectancy": ex(45, 0.1, 0.02, 0.2)}, None, 0.1)
+        self.assertEqual((v["state"], v["reason"], v["decided"]), ("pass", "above", None))
+        self.assertNotIn("Decided", v["text"])
+        self.assertEqual(S.verdict_history({"triggered": 12, "expectancy": ex(12, 0.1, 0.02, 0.2)}, None,
+                                           0.1)["reason"], "n_below_floor")
+
+    def test_control_verdict_is_floored_on_its_sessions(self):
         d = {"delta": 0.2, "lo": 0.05, "hi": 0.35, "n_sessions": 50}
-        self.assertEqual(S.verdict_control(d, 45)["state"], "pass")
-        self.assertEqual(S.verdict_control(d, 39)["reason"], "n_below_floor")
-        self.assertEqual(S.verdict_control(dict(d, delta=-0.2, lo=-0.3, hi=-0.01), 10)["state"], "fail")
-        self.assertEqual(S.verdict_control(dict(d, lo=-0.1), 45)["reason"], "straddles")
-        self.assertEqual(S.verdict_control(None, 45)["reason"], "no_control")
+        self.assertEqual(S.verdict_control(d)["state"], "pass")
+        self.assertTrue(S.verdict_control(d)["text"].endswith("the whole interval is over 0. A past sample is not a "
+                                                              "forward result."))
+        self.assertEqual(S.verdict_control(dict(d, n_sessions=39))["reason"], "n_below_floor")
+        low = S.verdict_control({"delta": -0.293, "lo": -0.581, "hi": -0.013, "n_sessions": 33})
+        self.assertEqual((low["state"], low["reason"]), ("unverified", "n_below_floor"))   # either sign
+        self.assertEqual(low["text"], "Cannot judge against the random-entry control: net delta -0.293 R a trade "
+                                      "(95% bootstrap [-0.581, -0.013]) over 33 paired sessions; 33 is below the "
+                                      "40-session floor.")
+        below = S.verdict_control(dict(d, delta=-0.2, lo=-0.3, hi=-0.01))
+        self.assertEqual(below["state"], "fail")
+        self.assertTrue(below["text"].endswith("the whole interval is under 0."))
+        self.assertEqual(S.verdict_control(dict(d, lo=-0.1))["reason"], "straddles")
+        self.assertEqual(S.verdict_control(None)["reason"], "no_control")
 
     def test_banned_words(self):
         for t in S.all_templates():
             self.assertEqual(S.banned_words(t), [], t)
-        samples = [S.verdict_history({"target": k, "stop": s, "triggered": k + s + 2}, r, c)["text"]
-                   for k, s, r, c in ((13, 15, 1.0, 0.13), (30, 30, 1.0, 0), (10, 50, 2.0, 0.2), (50, 10, 1.5, 0.1))]
+        hist = {"target": 13, "stop": 15, "triggered": 33}
+        samples = [S.verdict_history(dict(hist, expectancy=e), r, c)["text"]
+                   for e, r, c in ((ex(33, -0.2, -0.5, 0.1), 1.0, 0.13), (ex(70, 0.0, -0.1, 0.1), 1.0, 0),
+                                   (ex(70, -0.3, -0.4, -0.1), 2.0, 0.2), (ex(70, 0.3, 0.1, 0.4), 1.5, 0.1))]
         for t in samples:
             self.assertEqual(S.banned_words(t), [], t)
         for bad in ("Close to a coin flip", "Leans toward the target", "Strongly toward the stop",

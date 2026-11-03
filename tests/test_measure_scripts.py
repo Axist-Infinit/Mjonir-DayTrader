@@ -137,6 +137,25 @@ class ExitPlan(unittest.TestCase):
         self.assertIn("datr stop needs Massive daily bars", err)
         self.assertIn("unverified", err)
 
+    def test_the_live_quote_follows_the_now_clock(self):
+        exitp.cost_inputs = self.saved[0]                  # the real one, with Massive served below
+        asked = []
+        saved = (Y.fetch_adv_usd, Y.fetch_quote, exitp.SOURCE)
+        Y.fetch_adv_usd = lambda client, cal, sym, asof, n=20: ADV
+        Y.fetch_quote = lambda client, sym: asked.append(sym) or {"bid": 1.0, "ask": 1.01, "t_ms": 0}
+        exitp.SOURCE = "massive"
+        try:
+            real = exitp.utc_now()
+            today = exitp.to_eastern(real).date()
+            past = exitp.datetime.date(2026, 10, 19)
+            self.assertIsNone(exitp.cost_inputs("TSLA", past, exitp.parse_now("2026-10-19 10:16"))[2])
+            self.assertIsNone(exitp.cost_inputs("TSLA", today, exitp.parse_now("2026-10-19 10:16"))[2])
+            self.assertEqual(asked, [])                      # a replay's --now never asks the NBBO of now
+            self.assertIsNotNone(exitp.cost_inputs("TSLA", today, real)[2])
+            self.assertEqual(asked, ["TSLA"])
+        finally:
+            Y.fetch_adv_usd, Y.fetch_quote, exitp.SOURCE = saved
+
     def test_exit_and_target_must_agree(self):
         self.assertIn("--exit close has no target", self.plan("--exit", "close", "--target", "2R")[2])
         self.assertIn("use --exit close", self.plan("--exit", "target", "--target", "none")[2])
@@ -156,6 +175,11 @@ class Size(unittest.TestCase):
         o = size.bracket_order(with_card)
         self.assertEqual((o["order_class"], o["qty"], o["plan"]["max_loss"]), ("bracket", "7", with_card["max_loss"]))
         self.assertIn("round trip", o["why"])
+
+    def test_the_basis_must_be_net_or_gross(self):
+        with self.assertRaises(size.SizeError) as cm:
+            size.size_trade(reel_plan(), example_cfg(min_reward_risk_basis="nett"), today="2026-10-19")
+        self.assertIn("net or gross", str(cm.exception))
 
     def test_the_1r_reel_is_refused_on_net(self):
         s = size.size_trade(reel_plan(costs=card()), example_cfg(), today="2026-10-19")
