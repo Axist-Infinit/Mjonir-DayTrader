@@ -267,3 +267,77 @@ PRIMARY entry, the 4.1 table or the paper's ATR and RVOL floors. Status still DR
 | N7 no snapshot | stage 1 counts `no_snapshot` (no row) and `zero_volume` | `Rules.test_names_with_no_snapshot_row_are_counted` |
 | criterion 3 text | section 8.1: unverified (`no_year_at_floor`) when no year reaches 40 fires, never pass (D3) | `Years.test_the_year_criterion_has_three_states` |
 | SPY 13:00:00 reading | section 4.2: one sentence (D3) | `Pieces.test_the_store_and_the_spy_count` |
+
+## 8. The owner's choice: the paper's breakout (D4, code, D5)
+
+The owner chose the paper's breakout as the PRIMARY entry, with its ATR and RVOL floors (2026-11-03); the lead
+adopted the reviewer's recommendations for the rest. Status still DRAFT; nothing scored on real data.
+
+| commit | what | suite |
+| --- | --- | --- |
+| `90497a7` | D4, prereg text only (below) | 625 OK, 17.5 s |
+| `00e25c8` | the breakout code | 630 OK, 16.3 s |
+| `bb87bb8` | D5, section 10's counts refreshed for the two floors | 630 OK, 16.2 s |
+
+**D4 diff summary.** 2.1: the departures list drops the Entry bullet; Floors reads prior close not open, 20
+sessions not 14, the dollar floor added, the ATR a simple mean of 14 true ranges. 3.3: the range bullet
+(`below_atr`). 4.1: rows `RVOL_MIN` 1.0, `ATR_MIN` 0.50 USD, `ENTRY_LEVEL` (the first bar's high plus `TICK`, a
+buy-stop placed at 09:35), `ENTRY_UNTIL` (the `NO_ENTRIES_AFTER` bucket, 71 or 35); `NO_ENTRIES_AFTER` acts on the
+entry window of the primary and arm A, and the control. 4.3: the `RVOL_MIN` bullet (`below_rvol`). 4.4: F(D) are
+orders, trades are the fills, every verdict is over fills. 4.5: the Entry bullet and the Exit call
+(`check_entry_bar=True`). 5: arm E (the former primary), arm B on the fills. 6.1: a control per fill,
+`entry_until=u`, eligible bars 1 through min(u, last - 1), the "So:" sentence. 9: the live record stores the armed
+order at 09:35. 11: the buy-stop fill-bias bullet. 17 insertions, 11 deletions, one file.
+
+**The code** (`00e25c8`), with its pins:
+
+| item | change | pinned by |
+| --- | --- | --- |
+| `check_entry_bar` | `score_trade(..., check_entry_bar=False)`; True checks the fill bucket's own low first: a touch is the stop at the stop, exit bar k, no gap, MFE 0; the default path unchanged | test_mjonir_outcomes `EntryBar` (a touch, an untouched fill bar equal to the default, a short); the SIM_* pin and every chunk 2 test unchanged |
+| `stop_fill` | `mjonir.rvol.stop_fill(bars, level, first, until)` -> (k, max(level, open)) or None | test_scanner_rvol `Rules.test_stop_fill` (a touch, a gap-through open, never reached, the cancel bar, the level exactly, tuples) |
+| the floors | `ATR_MIN` (`below_atr`, `floors.min_atr_usd`, after the share floor) and `RVOL_MIN` (`below_rvol`, after the RVOL history); `atr_of` is one definition (trader-exit's arithmetic) | `Rules.test_the_guards_and_the_floors` (FLAT below_atr, QUIET below_rvol, the ATR floor off without the key); `Pieces.test_the_atr_is_trader_exits` |
+| the runner | the order at the 9:30 high plus `TICK`, live to the `ENTRY_UNTIL` bucket; a fill scored from k with `check_entry_bar`, its control inside 1..min(until, last - 1); arm B, slip-x2 and the one-tick (the level a tick away, refilled) on the fills; `no_fill` counted, never scored; arm E = the old 09:35 entry; orders, fills, `no_fill` by session in the report | `Window.test_a_synthetic_window_scores_and_writes_the_sidecar` (fills and no_fills both present, every fill in 1..until at or above its level, every primary control inside its order's window, arm E on every order, arm B on every fill); `test_the_parameters_are_the_documents` (ATR_MIN, RVOL_MIN, ENTRY_LEVEL, ENTRY_UNTIL rows) |
+| the scanner | rows carry `level`; floors gain `floors.min_atr_usd` (example config, `limits.FLOOR_KEYS`) and the RVOL floor; the record doc is `status "armed"`, `level`, `bar_index None`, `time "09:35"`, `cancel_at` = no_entries_after; watchlist hits carry `trigger {level, until}` | `Cli.test_the_record_rows_and_n_or`, `Cli.test_floors_come_from_the_config`, `Rules.test_the_rvol_arithmetic` |
+| the record | an armed trigger stores its order; `score_day` resolves the fill with `stop_fill` (None -> `no_fill`, scored once, no control, outside the gate; the report line names it only when present), else entry = the fill, stop = the fill minus the plan's risk, `score_trade` from k with `check_entry_bar`, the control inside 1..entry_until | `Cli.test_the_record_rows_and_n_or` (a fill on bar 5 at its level, the stop from the plan's risk, the control in 1..71), `Cli.test_an_order_no_bar_reaches_is_no_fill_once` |
+
+Pins edited (this fork's): test_budget `CONTRACT_CFG` and test_limits `test_the_example` gain `min_atr_usd`.
+
+**Readings I made where the message did not carry the text.**
+- 4.4: "the last two sentences of the first paragraph" taken literally would leave F(D) defined twice (fires,
+  then orders); I replaced the sentence that defined F(D) as fires and the paragraph's last sentence, and kept
+  "The paper ranks first ..." and "The alternative ...".
+- The four new 4.1 rows, 6.1's "So:" sentence and section 11's buy-stop bullet were not quoted in the message; I
+  wrote them to the stated content (same session, name, risk fraction, window, exit and costs for 6.1).
+- Left as written because "nothing else in the file changes": section 5's one-tick line still says "the entry
+  shifted `TICK`" (the code shifts the level and refills); 6.2 still says B2 differs from the primary only by the
+  `TOP_K` selection (it now also differs by the entry: the baselines enter at the 9:30 close, as 6.2 itself says);
+  6.1's delta paragraph and 8.1 still say "fires" (4.4's "every verdict of section 8 is over fills" governs); 2.1
+  does not list the tick above the high as a departure (the paper's stop is at the high).
+- `bar_stage(rows=False)` must now make the `RVOL_MIN` comparison to count `below_rvol`; it keeps and returns no
+  value. `first_bar_coverage` counts the names that reached the RVOL check (eligible plus `below_rvol`).
+- The live record's plan is trader-exit's at the order's level (cent prices, the ATR from Massive's adjusted daily
+  bars); at scoring the fill is unrounded and the stop is the fill minus that plan's risk.
+
+**D5: the counts re-run** at `00e25c8`, `nice -n 19`, from the worktree root: development 04:21:31 to 04:22:21
+EST (50 s), holdout to 04:23:07 (46 s); no request (the walks, the splits and the first-bar store were cached); exit
+0, no traceback. Unchanged from D2: the 68 reference walks (249 + 224 pages), 7,359 split rows, the sessions, every
+early close verified. Changed, as pasted into section 10:
+
+| | development | holdout |
+| --- | --- | --- |
+| eligible per session | median 251, IQR 194 to 323 (min 34, max 851) | median 296, IQR 219 to 395 (min 37, max 1,053) |
+| `insufficient_history` | 426,883 | 219,143 |
+| `split_guard` | 16,958 | 29,721 |
+| `below_price` | 1,043,541 | 1,041,908 |
+| `below_adv_usd` | 1,706,380 | 1,168,156 |
+| `below_adv_shares` | 464,791 | 391,884 |
+| `below_atr` | 99,302 | 115,988 |
+| `no_first_bar` | 253 | 236 |
+| `gap_guard` | 17 | 25 |
+| `rvol_history_short` | 2,684 | 2,786 |
+| `below_rvol` | 452,286 | 466,865 |
+| warmup sessions | 14 | 0 |
+| first_bar_coverage | 0.9959 | 0.9959 |
+
+The two new causes are the table's `below_atr` and `below_rvol` rows (a first bar under its own 14-session mean is
+the usual case); the median eligible names a session move from 1,003 and 1,223 (D2) to the medians above.
