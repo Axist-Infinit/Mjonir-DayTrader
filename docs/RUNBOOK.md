@@ -1,8 +1,9 @@
 # Runbook: the trading day (ET)
 
-Status: chunk 1 built the data layer. Steps marked "(chunk N)" are not built
-yet; their commands will not run until that chunk lands. Everything unmarked
-runs today.
+Status: chunk 1 built the data layer and chunk 2 the measurement (costs,
+intervals, the random-entry control; on `feat/c2-measure`). Steps marked
+"(chunk N)" are not built yet; their commands will not run until that chunk
+lands. Everything unmarked runs today.
 
 Every time below is New York time. The box clock is Mountain, so read times
 from the scripts' output or from `TZ=America/New_York date`, never from the
@@ -73,12 +74,23 @@ The full hazard list is in CLAUDE.md.
   over `entry.py check SYM --source massive`.
 - On a trigger the desk (chunk 4) chains:
   - exit plan, default `--stop or-mid --target 2R`
-    (`python3 trader-exit/exit.py plan --stop or-mid --target 2R --write`); the
-    Zarattini form `--target none --exit close --stop datr:0.10` is chunk 2;
-  - time machine with `--years 2 --control-draws 3` (chunk 2): the verdict
-    reads the history, net of costs, with its interval and the control delta;
-  - size: shares from the $100,000 notional capped by a 1% max loss (chunk 3);
-  - risk check, every check pass, block or unverified (chunk 3);
+    (`python3 trader-exit/exit.py plan --stop or-mid --target 2R --source
+    massive --write`): gross and net reward:risk, the cost card (the ADV$ tier
+    from Massive), refused under `min_reward_risk` on the net basis; the
+    Zarattini form is `--target none --exit close --stop datr:0.10` (the stop
+    from Massive's daily ATR; trader-budget writes an OTO order and the
+    ticket says to flatten by the flat-by);
+  - time machine: `python3 trader-timemachine/timemachine.py run --source
+    massive --years 2 --control-draws 3 --write`: the verdict reads the
+    history, net of costs, with its interval, and the control delta; the
+    Monte Carlo is a shape diagnostic only;
+  - size: `python3 trader-budget/size.py --write` sizes net of costs (the max
+    loss includes the round trip and both commissions); shares from the
+    $100,000 notional capped by a 1% max loss are chunk 3;
+  - risk check: `python3 trader-risk/check.py --source massive` checks loss
+    and reward:risk net of costs, the spread (live NBBO) and a no-target plan
+    (`allow_no_target`), each pass, block or unverified; the percent limits
+    and the other new checks are chunk 3;
   - the human ticket (chunk 4). The owner places the bracket by hand at
     E*TRADE and types the fills into `ticket.py fill`.
 - Every trigger, taken or skipped, lands in `record/triggers.jsonl` (chunk 3).

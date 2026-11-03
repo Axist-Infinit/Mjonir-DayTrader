@@ -48,8 +48,8 @@ in `trader/` under the current directory.
 | --- | --- | --- |
 | 0 | Bootstrap: NOTICE, CLAUDE.md, the plugin renamed `mjonir-daytrader` in marketplace `mjonir`, stub folders for the two new skills, a runbook stub | done |
 | 1 | Data layer on Massive: a stdlib `mjonir/` package (client, market calendar, bar cache, read-only local stores, Yahoo-shaped output), `--source massive` on each script, a bridge CLI, years of history instead of 60 days | done on `feat/c1-data` (not merged yet) |
-| 2 | Costs and intervals: slippage, spread and commission in every R; Wilson and bootstrap intervals; verdicts that say "cannot judge" below 40 fires | planned |
-| 2 | Random-entry control: every replay compared with random entries on the same sessions | planned |
+| 2 | Costs and intervals: slippage, spread and commission in every R; Wilson and bootstrap intervals; verdicts that say "cannot judge" below 40 fires | built on `feat/c2-measure` (not merged yet) |
+| 2 | Random-entry control: every replay compared with random entries on the same sessions | built on `feat/c2-measure` (not merged yet) |
 | 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | planned |
 | 3 | Risk in percent of a $100,000 notional; a relative-volume opening-range hypothesis, preregistered before any code | planned |
 | 4 | Human E*TRADE ticket: `/trader-broker` prints the order for the owner to type by hand | planned |
@@ -83,14 +83,52 @@ docs/RUNBOOK.md. Every time is New York time.
   control. Until then the record is the paper account, and the $100,000 is a
   unit of account, not an instruction to trade it. The gate is not a forecast.
 
-## A note on the numbers
+## The TSLA example, net of costs
 
-The TSLA example in the Upstream section below is upstream's arithmetic:
-gross, with no transaction costs, no confidence interval and no random-entry
-control. Chunk 2 recomputes it net of costs, and once it lands the numbers in
-that example will change (the history's average R, the verdict line, and
-whether the 1R plan clears reward to risk). Until then they stand as upstream
-published them.
+The example in the Upstream section below is the reel's trade (TSLA, Monday
+2026-10-19, entry 364.18 at 10:15 AM, stop 358.32, risk 5.86 a share).
+Upstream scored it gross: no costs, no interval, no control. Chunk 2 (built on
+`feat/c2-measure`) scores it net. Every number here was printed by the
+scripts; docs/reviews/chunk2.md has the commands and the full output.
+
+- **Costs.** TSLA's ADV$ over the 20 sessions before that day (Massive) is
+  about $12.7 billion: the 4 bp slippage tier. With the default 3 bp half
+  spread (no live quote for a past day, so the spread check is unverified)
+  and $1 commission on each order over 8 shares, the round trip is $0.76 a
+  share, 0.130 R.
+- **The 1R plan is refused.** Net reward:risk is (5.86 - 0.76) / (5.86 +
+  0.76) = 0.77, under the 1.0 minimum, so trader-exit refuses it (and
+  trader-risk blocks upstream's 8-share order: $59.37 at the stop net of
+  costs, over the $50 limit). The example moves to `--target 2R` (375.90):
+  2.0 gross, 1.66 net. trader-budget sizes it at 7 shares, because the $50
+  max loss now includes the round trip and both commissions ($46.59 at the
+  stop), and trader-risk passes it, with the spread unverified.
+- **The 60-day reading cannot judge.** On upstream's 60 days of Yahoo bars
+  the 1R rule fired 33 times: average R -0.261 net of costs (95 % bootstrap
+  interval -0.592 to +0.074, n 33; gross -0.062). 13 of 28 decided fires hit
+  the target (46.4 %, 95 % Wilson 29.5 % to 64.2 %) against a net break-even
+  of 56.5 %, and the verdict is the "Cannot judge" line: n is below the
+  40-fire floor. 11 of those 28 decisions cleared their level by under
+  0.05 R, and the entry one cent higher flips one outcome (2026-08-06). The
+  2R rule on the same 60 days: 3 of 20 decided fires hit the target, average
+  R -0.352 net (-0.678 to +0.017, n 33): cannot judge either.
+- **The two-year reading.** `timemachine.py run --source massive --years 2`
+  (499 sessions, 2024-10-21 to 2026-10-16, five early closes scored to 1:00
+  PM): the 1R rule fired 285 times, average R -0.125 net of costs (95 %
+  bootstrap interval -0.235 to -0.016, n 285; gross +0.056, -0.055 to
+  +0.165). 130 of 246 decided fires hit the target (52.8 %, Wilson 46.6 % to
+  59.0 %), an interval that holds the 56.5 % net break-even: "not
+  distinguishable from break-even". Against random entries on the same 285
+  sessions the net delta is -0.052 R a trade (-0.165 to +0.061): "not
+  distinguishable from the random-entry control". The 2R rule over the same
+  two years: average R -0.093 net (-0.231 to +0.044, n 285), 61 of 192
+  decided (31.8 %, Wilson 25.6 % to 38.7 %, break-even 37.7 %), delta -0.071
+  (-0.216 to +0.068): not distinguishable from either.
+
+That is one stock and one rule, measured on past sessions; it is not a
+forward result and it promises nothing. The size from the $100,000 notional
+capped by a 1 % max loss (the reel's 8 shares become about 170) is chunk 3
+and not built.
 
 ## Layout
 
@@ -213,22 +251,32 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    10:10 bar was still forming). At 10:15 it said triggered: the first
    5-minute close above the range, 364.18.
 4. **`/trader-exit`** set the plan before the entry: stop at the range's
-   midpoint, 358.32, so 5.86 a share at risk; target one times that risk,
-   370.04; flat by 3:55 PM either way.
-5. **`/trader-timemachine`** replayed the rest of the day 10,000 times, each
-   5-minute candle drawn from TSLA's own candles at that time of day over the
-   previous 59 sessions (seed 19, so anyone can repeat it): target first
-   29.4 %, stop first 25.5 %, still open at the close 45.1 %. It also re-ran
-   the same rule on those 59 real sessions: it fired 33 times, 13 hit the
-   target, 15 the stop, 5 neither. Its verdict: close to a coin flip. That is
-   the point of looking before you risk a dollar.
-6. **`/trader-budget`** with a $5,000 account and a $50 max loss per trade:
-   50 / 5.86 = 8 shares ($2,913.44). If the stop fills at 358.32, the loss is
-   $46.88. It writes one bracket order: buy 8 TSLA, stop-loss 358.32,
-   take-profit 370.04.
-7. **`/trader-risk`** checks it against your limits: the max loss, the daily
-   loss limit, trades per day, reward to risk, the entry window, position
-   size and cash. PASS or BLOCK, with the reason.
+   midpoint, 358.32, so 5.86 a share at risk; flat by 3:55 PM either way.
+   Upstream's target was one times that risk, 370.04; net of a $0.76 a share
+   round trip that is 0.77 reward to risk, and this fork refuses it. The
+   target here is two times the risk, 375.90: 2.0 gross, 1.66 net.
+5. **`/trader-timemachine`** re-ran the same rule on the previous 59 real
+   sessions, net of costs: the 1R rule fired 33 times, 13 hit the target, 15
+   the stop, 5 neither, average R -0.261 (95 % interval -0.592 to +0.074,
+   n 33). Its verdict: "Cannot judge: 13 of 28 decided fires hit the target
+   (46.4%, 95% Wilson [29.5%, 64.2%]); n is below the 40-fire floor. Net
+   break-even at 1R after costs is 56.5%." For the 2R plan, 3 of 20 decided
+   fires hit the target against a 37.7 % net break-even: it cannot judge
+   either. Two years of Massive bars are not
+   distinguishable from break-even or from random entries either (above,
+   "The TSLA example, net of costs"). Its 10,000 replays of the rest of the
+   day (seed 19) are a shape diagnostic only: target first 29.4 %, stop
+   first 25.5 %, still open at the close 45.1 %. That is the point of
+   looking before you risk a dollar.
+6. **`/trader-budget`** with a $5,000 account and a $50 max loss per trade,
+   net of costs: (50 - 2 commissions) / (5.86 + 0.51 round trip) = 7 shares
+   ($2,549.26). If the stop fills at 358.32, the loss is $46.59 with costs.
+   It writes one bracket order: buy 7 TSLA, stop-loss 358.32, take-profit
+   375.90. (Upstream sized 8 shares, $46.88, at 1R with no costs.)
+7. **`/trader-risk`** checks it against your limits: the max loss and
+   reward to risk net of costs, the spread, the daily loss limit, trades per
+   day, the entry window, position size and cash. PASS or BLOCK, with the
+   reason; an unverified check says so.
 8. **`/trader-broker`** shows you the ticket in plain words. You type yes for
    that exact order. Claude calls your brokerage connector (Alpaca's MCP
    server, paper account by default), and Claude's own "Allow once / Deny"
@@ -248,7 +296,7 @@ python3 trader-scanner/scan.py orb --at 10:15                          # opening
 python3 trader-news/news.py --tickers TSLA --hours 12                  # headlines, 8-Ks, today's move
 python3 trader-entry/entry.py check TSLA --setup orb                   # waiting / triggered / expired
 python3 trader-entry/entry.py watch TSLA --every 30                    # bar by bar until it triggers
-python3 trader-exit/exit.py plan --stop or-mid --target 1R --write     # -> trader/plan.json
+python3 trader-exit/exit.py plan --stop or-mid --target 2R --write     # -> trader/plan.json
 python3 trader-timemachine/timemachine.py run --write                  # 10,000 replays + the history
 python3 trader-budget/size.py --write                                  # -> trader/orders.json
 python3 trader-risk/check.py                                           # PASS / BLOCK per order

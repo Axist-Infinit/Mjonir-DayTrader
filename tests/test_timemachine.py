@@ -416,7 +416,7 @@ class Plans(unittest.TestCase):
                                  "every one.")
         for word in ("coin flip", "Leans", "Strongly"):
             for mc in ({"p_target": 0.30, "p_stop": 0.26}, {"p_target": 0.40, "p_stop": 0.30},
-                       {"p_target": 0.60, "p_stop": 0.30}):
+                       {"p_target": 0.20, "p_stop": 0.30}, {"p_target": 0.60, "p_stop": 0.30}):
                 self.assertNotIn(word, tm.mc_shape_line(mc))
 
     def test_a_2r_target_is_judged_against_its_break_even(self):
