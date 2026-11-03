@@ -120,7 +120,7 @@ class OnePlace(unittest.TestCase):
         # the review's grep: nothing compares a price with the stop or the target outside outcomes.py
         pat = re.compile(r">= target|<= stop|>= tgt|<= stp")
         hits = []
-        for folder in [d for d in os.listdir(ROOT) if d.startswith("trader-")] + ["mjonir"]:
+        for folder in [d for d in os.listdir(ROOT) if d.startswith("trader-")] + ["mjonir", "tools"]:
             for f in os.listdir(os.path.join(ROOT, folder)):
                 if f.endswith(".py") and not (folder == "mjonir" and f == "outcomes.py"):
                     with open(os.path.join(ROOT, folder, f), encoding="utf-8") as fh:

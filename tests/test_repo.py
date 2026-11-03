@@ -18,7 +18,7 @@ ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachi
               "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts", "trader-record",
               "trader-desk"]
 # the fork's tracked root entries beside the skill folders
-FORK_ROOT = ["NOTICE", "CLAUDE.md", "docs", "mjonir", "record"]
+FORK_ROOT = ["NOTICE", "CLAUDE.md", "docs", "mjonir", "record", "tools"]
 # local-only, never tracked: Claude Code's per-project folder, the cwd-relative runtime state,
 # a local key file and a test cache; tolerated when present, never required
 LOCAL_ONLY = (".claude", ".env", ".pytest_cache", "trader")

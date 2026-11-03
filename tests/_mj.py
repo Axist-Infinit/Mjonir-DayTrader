@@ -37,6 +37,7 @@ os.environ["MJONIR_DATA_DIR"] = DATA_DIR
 # ...and no test ever opens the real Kalex store or the flat files (a test that wants one builds it)
 os.environ["MJONIR_KALEX_5M"] = os.path.join(DATA_DIR, "no-kalex-store.sqlite3")
 os.environ["MJONIR_FLATFILE_DIR"] = os.path.join(DATA_DIR, "no-flatfiles")
+os.environ["MJONIR_DAILY_DIR"] = os.path.join(DATA_DIR, "no-daily-flatfiles")   # tools/rvol_study.py's daily cache
 atexit.register(shutil.rmtree, DATA_DIR, True)
 
 from mjonir import config as C  # noqa: E402
