@@ -50,13 +50,15 @@ in `trader/` under the current directory.
 | 1 | Data layer on Massive: a stdlib `mjonir/` package (client, market calendar, bar cache, read-only local stores, Yahoo-shaped output), `--source massive` on each script, a bridge CLI, years of history instead of 60 days | done on `feat/c1-data` (not merged yet) |
 | 2 | Costs and intervals: slippage, spread and commission in every R; Wilson and bootstrap intervals; verdicts that say "cannot judge" below 40 fires | built on `feat/c2-measure` (not merged yet) |
 | 2 | Random-entry control: every replay compared with random entries on the same sessions | built on `feat/c2-measure` (not merged yet) |
-| 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | planned |
-| 3 | Risk in percent of a $100,000 notional; a relative-volume opening-range hypothesis, preregistered before any code | planned |
+| 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | built on `feat/c3-record` (not merged) |
+| 3 | Risk in percent of a $100,000 trade notional: sizing, daily and weekly loss realized from the record, the loss-streak pause, the price, ADV, chase and averaging-down floors | built on `feat/c3-record` (not merged) |
+| 3 | A relative-volume opening-range hypothesis, preregistered before any code | planned |
 | 4 | Human E*TRADE ticket: `/trader-broker` prints the order for the owner to type by hand | planned |
 | 4 | The desk: `/trader-desk` runs the daily routine as one command | planned |
 
-The two new skill folders, `/trader-record` and `/trader-desk`, are stubs
-today: each SKILL.md says what it will do and points to docs/RUNBOOK.md.
+`/trader-desk` is a stub today: its SKILL.md says what it will do and
+points to docs/RUNBOOK.md. `/trader-record` is built (chunk 3).
+Built and not merged means the commands run on that branch only.
 
 ## The daily routine (ET)
 
@@ -141,18 +143,26 @@ scripts; docs/reviews/chunk2.md has the commands and the full output.
   not distinguishable from the control.
 
 That is one stock and one rule, measured on past sessions; it is not a
-forward result and it promises nothing. The size from the $100,000 notional
-capped by a 1 % max loss (the reel's 8 shares become about 170) is chunk 3
-and not built.
+forward result and it promises nothing.
+
+Sized on the fork's example config (chunk 3, built on `feat/c3-record`): a
+$100,000 trade notional with a 1 % max loss, net of costs, makes the 2R plan
+156 shares ($56,812.08, 56.81 % of the notional); the risk at the stop is
+$914.16 before costs and $995.70 net, under the $1,000 cap, and the net
+reward:risk at that size is 1.75. The plan's estimate of about 170 shares
+was gross (1,000 / 5.86); the 0.51 a share round trip and the two
+commissions bring it to 156. The example config's risk check then wants a
+live spread and a fresh price before it passes the order; on a past day
+both are unverified, so it blocks. docs/reviews/chunk3a.md has the output.
 
 ## Layout
 
 ```
 .claude-plugin/   plugin mjonir-daytrader in marketplace mjonir, "skills": "./"
-trader-*/         upstream's eleven skills, plus trader-record and trader-desk (stubs)
+trader-*/         upstream's eleven skills, plus trader-record (built) and trader-desk (a stub)
 mjonir/           the stdlib data and measurement layer (chunk 1 onward)
 docs/             RUNBOOK.md, reviews/
-record/           the forward record: tracked, append-only (chunk 3)
+record/           the forward record: tracked, append-only (trader-record)
 trader/           runtime state and caches: gitignored, created in the cwd
 tests/            upstream's suite plus the fork's tests
 NOTICE            attribution; LICENSE is upstream's MIT license, unchanged
@@ -286,7 +296,9 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    net of costs: (50 - 2 commissions) / (5.86 + 0.51 round trip) = 7 shares
    ($2,549.26). If the stop fills at 358.32, the loss is $46.59 with costs.
    It writes one bracket order: buy 7 TSLA, stop-loss 358.32, take-profit
-   375.90. (Upstream sized 8 shares, $46.88, at 1R with no costs.)
+   375.90. (Upstream sized 8 shares, $46.88, at 1R with no costs. The fork's
+   example config sizes against a $100,000 trade notional instead: 156
+   shares, above.)
 7. **`/trader-risk`** checks it against your limits: the max loss and
    reward to risk net of costs, the spread, the daily loss limit, trades per
    day, the entry window, position size and cash. PASS or BLOCK, with the

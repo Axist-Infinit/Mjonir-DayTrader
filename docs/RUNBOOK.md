@@ -1,7 +1,9 @@
 # Runbook: the trading day (ET)
 
-Status: chunk 1 built the data layer and chunk 2 the measurement (costs,
-intervals, the random-entry control; on `feat/c2-measure`). Steps marked
+Status: chunk 1 built the data layer, chunk 2 the measurement (costs,
+intervals, the random-entry control; on `feat/c2-measure`) and chunk 3 the
+forward record and the risk in percent of the trade notional (on
+`feat/c3-record`; the relative-volume steps are not built). Steps marked
 "(chunk N)" are not built yet; their commands will not run until that chunk
 lands. Everything unmarked runs today.
 
@@ -39,7 +41,8 @@ The full hazard list is in CLAUDE.md.
 - `python3 -m mjonir.bridge status`: key, probe, calendar, cache, universe,
   the read-only local stores.
 - `desk.py weekly` (chunk 4) will chain the three.
-- `record.py journal` (chunk 3), and read the gate.
+- `python3 trader-record/record.py journal`, then `record.py report`: read
+  the gate (PASSES, FAILS or NOT YET, with the reasons).
 
 ## 08:00 to 08:30, premarket
 
@@ -84,16 +87,24 @@ The full hazard list is in CLAUDE.md.
     massive --years 2 --control-draws 3 --write`: the verdict reads the
     history, net of costs, with its interval, and the control delta; the
     Monte Carlo is a shape diagnostic only;
-  - size: `python3 trader-budget/size.py --write` sizes net of costs (the max
-    loss includes the round trip and both commissions); shares from the
-    $100,000 notional capped by a 1% max loss are chunk 3;
+  - size: `python3 trader-budget/size.py --write` sizes net of costs from the
+    `sizing` block: shares from the $100,000 trade notional capped by the 1%
+    max loss (the round trip and both commissions included); it prints the
+    notional and the risk in dollars and as a percent of the notional;
   - risk check: `python3 trader-risk/check.py --source massive` checks loss
     and reward:risk net of costs, the spread (live NBBO) and a no-target plan
-    (`allow_no_target`), each pass, block or unverified; the percent limits
-    and the other new checks are chunk 3;
+    (`allow_no_target`), the price and ADV floors, the chase (live ask),
+    averaging down, the daily and weekly loss REALIZED from the record, and
+    the losing-streak pause, each pass, block or unverified; with
+    `block_on_unverified` (the example config) an unverified check blocks;
   - the human ticket (chunk 4). The owner places the bracket by hand at
     E*TRADE and types the fills into `ticket.py fill`.
-- Every trigger, taken or skipped, lands in `record/triggers.jsonl` (chunk 3).
+- Every trigger, taken or skipped, lands in `record/triggers.jsonl`:
+  `entry.py check` and `watch` append it (`--record` is on by default), with
+  trader-exit's default plan for the setup unless `--plan` names one;
+  `ticket.py approve` and `decline` append the decision; `ticket.py fill`
+  holds the fills `record.py score` reads for a taken trade. Enter the fills
+  before the 16:30 score: a score line is written once.
 
 ## During the trade: manage
 
@@ -101,14 +112,17 @@ The full hazard list is in CLAUDE.md.
   `alerts.py check --source massive` (one snapshot request for every ticker).
 - Flat by 15:55 (12:55 on early-close days).
 - No adds, no averaging down, no chasing past 0.5% over the trigger (the
-  risk check blocks all three in chunk 3).
+  risk check blocks all three: a second buy of the name today is a
+  duplicate, `averaging_down` and `chase`).
 
 ## 16:30, close
 
-- `desk.py close` (chunk 4): `record.py score --date today` (chunk 3) fills
-  outcomes from the session's 5-minute bars (and the hand-entered fills where
-  they exist), writes the matched control rows, prints the report and the
-  gate, and commits `record/`.
+- `desk.py close` (chunk 4) will chain these; today run them by hand:
+  `python3 trader-record/record.py score --date <today> --source massive`
+  fills outcomes from the session's 5-minute bars (and the hand-entered fills
+  where they exist) and writes the matched control rows, once; then
+  `record.py report` prints the report and the gate; then commit `record/`
+  (`git add record/ && git commit`).
 
 ## The money gate
 
