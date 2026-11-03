@@ -22,7 +22,8 @@ No row of session D is read before the first-bar stage: the floors use the windo
 
 scan(fetch, cal, day, symbols, floors, ...) is the live scanner's two stages: one full-market snapshot ranks
 day volume over the window's mean volume to a shortlist (a past day has no snapshot: every name past the
-floors goes to stage 2), then the exact first-bar RVOL from mjonir.bars.bars_5m on the shortlist. Its data
+floors goes to stage 2, or a --shortlist by the day's whole-session volume), then the exact first-bar RVOL
+from mjonir.bars.bars_5m on the shortlist. Its data
 (Massive, adjusted) differ from the study's (the flat files, unadjusted); its list can differ from the study's
 on a few names a day (PREREG section 11). The rules do not differ.
 """
@@ -106,11 +107,12 @@ def floors_stage(symbols, daily, split_hit, floors, adv_n=ADV_N):
     return passed, counts
 
 
-def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD):
+def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD, rows=True):
     """Section 4.3 and the gap guard of 3.4 on the names past the floors. first_bars: {sym: first bar of D};
     history(sym) -> the 09:30 volumes of the rvol_n sessions strictly before D, oldest first, None where a
     session has no bucket. Returns ([{symbol, rvol, first_bar, direction, price, adv_usd, adv_shares}],
-    {cause: n}), sorted by symbol."""
+    {cause: n}), sorted by symbol. rows=False (the study's counts-only mode) returns the eligible SYMBOLS
+    only: no RVOL and no direction is computed for any name."""
     counts = dict((c, 0) for c in BAR_CAUSES)
     out = []
     for sym in sorted(passed):
@@ -125,6 +127,9 @@ def bar_stage(passed, first_bars, history, rvol_n=RVOL_N, gap=GAP_GUARD):
         hist = list(history(sym) or [])
         if len(hist) < rvol_n or any(h is None or not h > 0 for h in hist[-rvol_n:]):
             counts["rvol_history_short"] += 1
+            continue
+        if not rows:
+            out.append(sym)
             continue
         hist = hist[-rvol_n:]
         mean = sum(float(h) for h in hist) / rvol_n
@@ -237,13 +242,19 @@ def split_days(rows):
     return out
 
 
-def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV_N, shortlist=SHORTLIST,
-         live=True, gap=GAP_GUARD):
+def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV_N, shortlist=None,
+         live=True, gap=GAP_GUARD, say=None):
     """The live list for session `day`. Stage 1 (live): one snapshot, day volume over the window's mean volume,
-    the `shortlist` highest past the floors (ties by ticker); a past day (live False) has no snapshot, so every
-    name past the floors goes on. Stage 2: the 09:30 buckets of D and the `lookback` sessions before it from
-    bars_5m, then bar_stage and rank. Returns the document scan.py writes (rows, fires, counts)."""
+    the `shortlist` highest past the floors (ties by ticker; a name with no snapshot row is counted no_snapshot).
+    A past day (live False) has no snapshot: every name past the floors goes on, or, with a shortlist, the
+    highest by the day's whole-session volume over the mean (a replay-only proxy the 9:35 snapshot cannot know;
+    the floors still read only the sessions before the day). Stage 2: the 09:30 buckets of D and the `lookback`
+    sessions before it from bars_5m, then bar_stage and rank; say(text) hears the stage-2 request count first.
+    shortlist None: SHORTLIST live, every name past the floors on a replay. Returns the document scan.py writes
+    (rows, fires, counts)."""
     day = K.as_date(day)
+    if live and shortlist is None:
+        shortlist = SHORTLIST
     prev = cal.prev_session(day)
     adv_days = cal.sessions_back(prev, int(adv_n))
     hist_days = cal.sessions_back(prev, int(lookback))
@@ -263,24 +274,41 @@ def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV
         return any(lo <= x <= hi for x in sp.get(sym, ()))
     passed, c_floor = floors_stage(symbols, daily, split_hit, floors, adv_n)
     stage1 = {"candidates": len(set(symbols)), "passed_floors": len(passed)}
-    if live:
-        vols, meta = fetch.snapshot(day)
-        ratios = []
+    if live or shortlist:
+        if live:
+            vols, meta = fetch.snapshot(day)
+            basis = "snapshot: day volume over the %d-session mean volume" % adv_n
+        else:
+            g = fetch.grouped(day)
+            vols = dict((t, float(r.get("v") or 0.0)) for t, r in g.items())
+            meta = {"rows": len(g), "other_day": 0}
+            basis = ("replay with a shortlist: the day's whole-session volume (grouped daily) over the %d-session "
+                     "mean volume, a proxy the live 9:35 snapshot cannot know; the floors still read only the "
+                     "sessions before the day" % adv_n)
+        ratios, no_snap, zero = [], 0, 0
         for sym in sorted(passed):
             v = vols.get(sym)
-            if v is not None and v > 0:
+            if v is None:
+                no_snap += 1
+            elif not v > 0:
+                zero += 1
+            else:
                 ratios.append((-(v / passed[sym]["adv_shares"]), sym))
         ratios.sort()
         short = [s for _, s in ratios[:int(shortlist)]]
-        stage1.update(basis="snapshot: day volume over the %d-session mean volume" % adv_n,
-                      snapshot_rows=meta.get("rows"), snapshot_other_day=meta.get("other_day"),
-                      with_volume=len(ratios), shortlist=len(short), shortlist_size=int(shortlist))
-        vx = dict((s, -r) for r, s in ratios)
+        stage1.update(basis=basis, snapshot_rows=meta.get("rows"), snapshot_other_day=meta.get("other_day"),
+                      no_snapshot=no_snap, zero_volume=zero, with_volume=len(ratios), shortlist=len(short),
+                      shortlist_size=int(shortlist))
+        vx = dict((s, -r) for r, s in ratios) if live else {}
     else:
         short = sorted(passed)
         stage1.update(basis="replay: a past day has no snapshot, every name past the floors goes to stage 2",
                       shortlist=len(short), shortlist_size=None)
         vx = {}
+    if say is not None:
+        say("Stage 2: 5-minute bars for %d names over %d sessions: about %d requests (a bar range and a split "
+            "check a name; sessions already cached are not asked again)."
+            % (len(short), len(hist_days) + 1, 2 * len(short)))
     bars, errors = fetch.first_bars(short, hist_days + [day]) if short else ({}, {})
     firsts = dict((s, (bars.get(s) or {}).get(day.isoformat())) for s in short if s in bars)
     hist_iso = [d.isoformat() for d in hist_days]
@@ -307,5 +335,5 @@ def scan(fetch, cal, day, symbols, floors, top=TOP_K, lookback=RVOL_N, adv_n=ADV
             "windows": {"adv": [adv_days[0].isoformat(), adv_days[-1].isoformat()],
                         "rvol_history": [hist_days[0].isoformat(), hist_days[-1].isoformat()]},
             "params": {"top": int(top), "lookback": int(lookback), "adv_sessions": int(adv_n),
-                       "shortlist": int(shortlist) if live else None, "gap_guard": list(gap),
+                       "shortlist": int(shortlist) if shortlist else None, "gap_guard": list(gap),
                        "floors": dict(floors)}}

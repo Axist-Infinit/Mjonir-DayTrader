@@ -178,6 +178,25 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(S.banned_words("Edge not distinguishable from zero: 45 fires"), [])
 
 
+class Years(unittest.TestCase):
+    def test_the_year_criterion_has_three_states(self):
+        v = S.verdict_years({"2021": (39, 0.2), "2022": (10, -0.3)})
+        self.assertEqual((v["state"], v["reason"], v["years"]), ("unverified", "no_year_at_floor", []))
+        self.assertEqual(v["text"], "Cannot judge the years: no calendar year holds 40 fires.")
+        v = S.verdict_years({"2021": (40, 0.01), "2022": (55, 0.2), "2023": (12, -0.5)})
+        self.assertEqual((v["state"], v["years"]), ("pass", ["2021", "2022"]))   # a year under the floor is not read
+        v = S.verdict_years({"2021": (40, 0.01), "2022": (55, 0.0)})
+        self.assertEqual((v["state"], v["reason"], v["years"]), ("fail", "below", ["2022"]))
+        self.assertIn("(2022)", v["text"])
+
+    def test_the_sign_flip_note(self):
+        self.assertIsNone(S.sign_flip_note({"2021": (5, 0.1), "2022": (7, 0.2), "2023": (3, 0.0)}))
+        self.assertEqual(S.sign_flip_note({"2022": (7, -0.25), "2021": (5, 0.1), "2023": (2, None)}),
+                         "The sign of the net average flips between years: 2021 +0.100 (n 5), 2022 -0.250 (n 7).")
+        for t in (S.Y_NONE, S.Y_ABOVE, S.Y_BELOW, S.Y_FLIP):
+            self.assertIn(t, S.all_templates())
+
+
 class PythonEight(unittest.TestCase):
     def test_the_measurement_modules_parse_as_python_3_8(self):
         # the trader scripts (3.8 syntax) import these four on every run

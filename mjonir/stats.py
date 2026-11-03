@@ -232,7 +232,39 @@ def verdict_control(delta, floor=N_FLOOR):
     return dict(out, state="unverified", reason="straddles", text=C_STRADDLE.format(**f))
 
 
+# The by-year reading (docs/PREREG_RVOL_ORB.md criterion 3): every calendar year with at least `floor` fires has
+# a net mean above 0. No year at the floor is unverified, never a pass. And the sign-flip note beside a by-year table.
+Y_NONE = "Cannot judge the years: no calendar year holds {floor} fires."
+Y_ABOVE = "Every calendar year with at least {floor} fires has a net mean above 0 ({years})."
+Y_BELOW = "A calendar year with at least {floor} fires has a net mean at or under 0 ({years})."
+Y_FLIP = "The sign of the net average flips between years: {years}."
+
+
+def verdict_years(means, floor=N_FLOOR):
+    """``means``: {year: (n, net mean)}. no year with n >= floor -> unverified/no_year_at_floor; any such year with a
+    mean at or under 0 -> fail/below (those years); else pass/above (the years counted).
+    Returns {state, reason, years, text}."""
+    at = dict((y, m) for y, (n, m) in means.items() if n >= floor)
+    if not at:
+        return {"state": "unverified", "reason": "no_year_at_floor", "years": [], "text": Y_NONE.format(floor=floor)}
+    bad = sorted(y for y, m in at.items() if not m > 0)
+    if bad:
+        return {"state": "fail", "reason": "below", "years": bad,
+                "text": Y_BELOW.format(floor=floor, years=", ".join(bad))}
+    return {"state": "pass", "reason": "above", "years": sorted(at),
+            "text": Y_ABOVE.format(floor=floor, years=", ".join(sorted(at)))}
+
+
+def sign_flip_note(means):
+    """``means``: {year: (n, net mean)}. The Y_FLIP note when the net mean's sign differs between years (a zero mean
+    has no sign), else None."""
+    signs = dict((y, m > 0) for y, (n, m) in means.items() if m is not None and m != 0)
+    if len(set(signs.values())) < 2:
+        return None
+    return Y_FLIP.format(years=", ".join("%s %s (n %d)" % (y, _r(means[y][1]), means[y][0]) for y in sorted(signs)))
+
+
 def all_templates():
     """Every verdict template, for the banned-words test."""
     return [T_NONE, T_FLOOR, T_BELOW, T_ABOVE, T_STRADDLE, D_LINE, D_LINE_OFF, D_NONE, C_NONE, C_FLOOR, C_BELOW,
-            C_ABOVE, C_STRADDLE]
+            C_ABOVE, C_STRADDLE, Y_NONE, Y_ABOVE, Y_BELOW, Y_FLIP]

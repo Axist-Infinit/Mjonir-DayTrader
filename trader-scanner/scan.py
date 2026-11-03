@@ -1268,7 +1268,7 @@ def cmd_rvol(a):
     if SOURCE != "massive":
         raise ScanError("rvol reads Massive (a full-market snapshot and 5-minute bars): run it with --source massive "
                         "or export TRADER_SOURCE=massive")
-    if a.top < 1 or a.lookback < 1 or a.shortlist < 1:
+    if a.top < 1 or a.lookback < 1 or (a.shortlist is not None and a.shortlist < 1):
         raise ScanError("--top, --lookback and --shortlist want whole numbers above 0")
     now = parse_now(a.now)
     local = to_eastern(now)
@@ -1279,7 +1279,11 @@ def cmd_rvol(a):
     symbols = rvol_symbols(a)
     progress(a, "RVOL list for %s: %s names in the type list; stage 1 %s..."
              % (day.isoformat(), "{:,}".format(len(symbols)), "one snapshot" if live else "skipped (a past day)"))
-    doc = ad.rvol_scan(day, symbols, floors, a.top, a.lookback, a.shortlist, live)
+    shortlist = a.shortlist if a.shortlist is not None else (R.SHORTLIST if live else None)
+    def say(msg):     # the stage-2 request count: stderr, so --json stays clean; only --quiet silences it
+        if not a.quiet:
+            print(msg, file=sys.stderr, flush=True)
+    doc = ad.rvol_scan(day, symbols, floors, a.top, a.lookback, shortlist, live, say=say)
     doc.update({"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "rvol",
                 "setup": RVOL_SETUP, "source": SOURCE, "universe": len(symbols), "floors_from": src,
                 "as_of": "%s %s ET" % (day.isoformat(), local.strftime("%H:%M") if day == local.date() else "close"),
@@ -1303,9 +1307,15 @@ def cmd_rvol(a):
              "{:,}".format(s1["candidates"]),
              ", ".join("%s %s" % (k.replace("_", " "), "{:,}".format(f[k])) for k in R.FLOOR_CAUSES)))
     if live:
-        print("Stage 1: one snapshot (%s rows, %s of another day); %s names with day volume; the %s highest day volume "
-              "over mean volume go to stage 2." % ("{:,}".format(s1["snapshot_rows"]), "{:,}".format(s1["snapshot_other_day"]),
-                                                   "{:,}".format(s1["with_volume"]), "{:,}".format(s1["shortlist"])))
+        print("Stage 1: one snapshot (%s rows, %s of another day); %s names past the floors with day volume (%s with "
+              "no snapshot row, %s at zero); the %s highest day volume over mean volume go to stage 2."
+              % ("{:,}".format(s1["snapshot_rows"]), "{:,}".format(s1["snapshot_other_day"]),
+                 "{:,}".format(s1["with_volume"]), "{:,}".format(s1["no_snapshot"]), "{:,}".format(s1["zero_volume"]),
+                 "{:,}".format(s1["shortlist"])))
+    elif s1.get("shortlist_size"):
+        print("Stage 1 (replay, --shortlist %d): the day's whole-session volume over mean volume, a proxy the live "
+              "snapshot cannot know (the floors read only the sessions before the day); %s go to stage 2."
+              % (s1["shortlist_size"], "{:,}".format(s1["shortlist"])))
     else:
         print("Stage 1: skipped (a past day has no snapshot); every name past the floors goes to stage 2 (%s)."
               % "{:,}".format(s1["shortlist"]))
@@ -1383,7 +1393,8 @@ def main(argv=None):
     p.add_argument("--date", help="replay a past session, YYYY-MM-DD (default: today, live)")
     p.add_argument("--top", type=int, default=20, help="the list's length (20)")
     p.add_argument("--lookback", type=int, default=14, help="sessions in the RVOL denominator (14)")
-    p.add_argument("--shortlist", type=int, default=200, help="names stage 1 sends to stage 2, live (200)")
+    p.add_argument("--shortlist", type=int, help="names stage 1 sends to stage 2 (live: 200; a --date replay: every "
+                                                  "name past the floors unless given)")
     p.add_argument("--source", choices=["yahoo", "massive"], help="massive (required); or export TRADER_SOURCE=massive")
     p.add_argument("--now", help='pretend it is this time ("2026-10-19 09:40" New York, or ...Z)')
     p.add_argument("--write", default="trader/rvol.json", help="the list (default trader/rvol.json)")

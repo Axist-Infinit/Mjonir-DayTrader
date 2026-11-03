@@ -201,10 +201,53 @@ class Freeze(Market):
     def test_the_frozen_repo_passes_and_names_f1(self):
         self.assertEqual(study.freeze_check(self.repo), self.f1)
 
-    def test_the_draft_is_refused_by_status(self):
-        with self.assertRaises(study.Refused) as e:
-            study.freeze_check(ROOT)                    # this branch's own document is a DRAFT
-        self.assertEqual(e.exception.check, "status")
+    def test_this_documents_own_status_gives_the_matching_outcome(self):
+        # reads the document's own status line, so F1 and F2 do not turn the suite red
+        with open(os.path.join(ROOT, study.PREREG), encoding="utf-8") as fh:
+            line = next(ln for ln in fh.read().split("\n") if ln.startswith("Status: "))
+        m = study.STATUS_RE.match(line)
+        if m:
+            self.assertTrue(study.freeze_check(ROOT).startswith(m.group(1)), line)
+        else:                                            # DRAFT, or F1's "commit pending"
+            self.assertIn(line, (study.STATUS_DRAFT, study.STATUS_PENDING))
+            with self.assertRaises(study.Refused) as e:
+                study.freeze_check(ROOT)
+            self.assertEqual(e.exception.check, "status")
+
+    def test_a_retune_repointed_at_a_later_pending_commit_is_refused(self):
+        repo = os.path.join(tempfile.mkdtemp(dir=self.root), "r")
+        shutil.copytree(self.repo, repo)
+        path = os.path.join(repo, study.PREREG)
+        with open(path, encoding="utf-8") as fh:
+            good = fh.read()
+        frozen_line = "Status: FROZEN (commit %s)" % self.f1
+        retuned = good.replace("| `TOP_K` | 20 |", "| `TOP_K` | 25 |")
+
+        def commit(body, msg):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            git(repo, "commit", "-q", "-am", msg)
+            return git(repo, "rev-parse", "HEAD")
+        c3 = commit(retuned.replace(frozen_line, study.STATUS_PENDING), "C3: retune, pending")
+        commit(retuned.replace(frozen_line, "Status: FROZEN (commit %s)" % c3), "C4: points at C3")
+        with self.assertRaises(study.Refused) as e:      # C3's parent is F2, not the draft
+            study.freeze_check(repo)
+        self.assertEqual(e.exception.check, "freeze commit")
+        self.assertIn("parent", str(e.exception))
+        c5 = commit(retuned.replace(frozen_line, study.STATUS_DRAFT), "C5: back to a draft")
+        c6 = commit(retuned.replace(frozen_line, study.STATUS_PENDING), "C6: pending again")
+        commit(retuned.replace(frozen_line, "Status: FROZEN (commit %s)" % c6), "C7: points at C6")
+        with self.assertRaises(study.Refused) as e:      # a re-freeze: an earlier version already reads FROZEN
+            study.freeze_check(repo)
+        self.assertEqual(e.exception.check, "freeze commit")
+        self.assertIn("frozen before", str(e.exception))
+        self.assertTrue(c5)
+        d0 = git(repo, "rev-list", "--max-parents=0", "HEAD")
+        commit(good.replace(frozen_line, "Status: FROZEN (commit %s)" % d0), "points at D0")
+        with self.assertRaises(study.Refused) as e:      # D0 reads DRAFT, not pending
+            study.freeze_check(repo)
+        self.assertEqual(e.exception.check, "freeze commit")
+        self.assertEqual(study.freeze_check(self.repo), self.f1)      # the honest D0, F1, F2 path passes
 
     def test_an_altered_body_a_planted_hash_and_a_dirty_file(self):
         repo = os.path.join(tempfile.mkdtemp(dir=self.root), "r")
@@ -287,6 +330,34 @@ class Freeze(Market):
         with open(os.path.join(rd, "rvol_dev_2027-01-01.json"), "w") as fh:
             json.dump(side, fh)
         self.assertEqual(study.holdout_check(repo, True), "rvol_dev_2027-01-01.json")
+        # the counted criteria come from the frozen text, never from the sidecar
+        with open(os.path.join(rd, "rvol_dev_2027-01-01.json"), "w") as fh:
+            json.dump(dict(side, criteria=dict(side["criteria"], **{"4": {"state": "unverified"}}),
+                           criteria_counted=["1", "2", "3"]), fh)
+        with self.assertRaises(study.Refused) as e:
+            study.holdout_check(repo, True)
+        self.assertEqual(e.exception.check, "development sidecar")
+        doc = os.path.join(repo, study.PREREG)
+        with open(doc, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(doc, "w", encoding="utf-8") as fh:            # a text that strikes criterion 4
+            fh.write(text.replace("4. The session-level interval", "4. ~~struck~~"))
+        self.assertEqual(study.holdout_check(repo, True), "rvol_dev_2027-01-01.json")
+        with open(doc, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        with open(os.path.join(rd, "rvol_dev_2027-01-01.json"), "w") as fh:
+            json.dump(side, fh)
+        # the holdout review goes where the second-run refusal looks
+        for bad in (os.path.join(self.root, "rvol_holdout_x.md"), os.path.join(rd, "holdout.md"),
+                    os.path.join(rd, "rvol_holdout_x.json")):
+            with self.assertRaises(study.Refused) as e:
+                study.holdout_out_check(repo, bad)
+            self.assertEqual(e.exception.check, "holdout out")
+        self.assertIsNone(study.holdout_out_check(repo, os.path.join(rd, "rvol_holdout_2027-02-01.md")))
+        self.assertIsNone(study.holdout_out_check(repo, None))
+        code, out, err = run_main(["--window", "holdout", "--i-have-read-the-prereg", "--out",
+                                   os.path.join(self.root, "elsewhere.md")], repo=repo)
+        self.assertEqual((code, "check holdout out" in err), (1, True))
         with open(os.path.join(rd, "rvol_holdout_2027-02-01.md"), "w") as fh:
             fh.write("x\n")
         with self.assertRaises(study.Refused) as e:
@@ -384,6 +455,34 @@ class Pieces(Market):
                                  {"risk_floor": 3})
         self.assertGreater(found, 100)       # the float edge the guard exists for is real
 
+    def test_a_session_scored_with_other_code_is_scored_again(self):
+        st = self.make()
+        st.splits()
+        day = CAL.sessions_between(WIN["dev"][0], WIN["dev"][1])[20]
+        st.score_session(day, study._timemachine())
+        with open(st.day_path(day)) as fh:
+            rows = [json.loads(x) for x in fh]
+        self.assertEqual((rows[0]["kind"], rows[-1]["kind"]), ("session", "end"))
+        self.assertEqual(rows[0]["stamp"], st.stamp)
+        self.assertEqual(rows[-1]["stamp"], st.stamp)
+        self.assertEqual(sorted(st.stamp), ["code_sha256", "runner_commit"])
+        self.assertEqual(len(st.stamp["code_sha256"]), 64)
+        self.assertEqual(st.read_day(day), rows[:-1])
+        good = st.stamp
+        for other in (dict(good, code_sha256="0" * 64), dict(good, runner_commit="f" * 40)):
+            st.stamp = other
+            self.assertIsNone(st.read_day(day))
+        st.stamp = good
+        self.assertIsNotNone(st.read_day(day))
+        saved = dict(study.PARAMS)
+        try:
+            study.PARAMS["POSTHOC_GATE_DATE"] = "2099-01-01"      # any parameter changes the hash
+            self.assertNotEqual(study.code_stamp(study.REPO, R)["code_sha256"], good["code_sha256"])
+        finally:
+            study.PARAMS.clear()
+            study.PARAMS.update(saved)
+        self.assertEqual(study.code_stamp(study.REPO, R), good)
+
     def test_the_control_pinned_to_bar_zero_gives_a_delta_of_zero(self):
         rule, ctrl = {}, {}
         for k in range(45):
@@ -448,9 +547,21 @@ class Window(Market):
     def test_counts_only_writes_counts_and_nothing_else(self):
         data = tempfile.mkdtemp(dir=self.root)
         out = os.path.join(data, "counts.json")
-        code, text, err = run_main(["--window", "dev", "--counts-only", "--out", out], repo=ROOT, client=fake_client(),
-                                   study_kw=self.kw(data))
+        calls = []
+        real = R.bar_stage
+
+        def spy(*a, **kw):
+            calls.append(kw.get("rows", True))
+            return real(*a, **kw)
+        R.bar_stage = spy
+        try:
+            code, text, err = run_main(["--window", "dev", "--counts-only", "--out", out], repo=ROOT,
+                                       client=fake_client(), study_kw=self.kw(data))
+        finally:
+            R.bar_stage = real
         self.assertEqual(code, 0, err)
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {False})           # counts-only computes no RVOL and no direction
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(set(doc), set(study.COUNT_KEYS))

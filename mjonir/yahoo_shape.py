@@ -806,13 +806,14 @@ class Adapter(object):
         """news.py: Massive news rows (JSON text or a list) as trader-news items."""
         return self._run(lambda: news_items(ticker, json.loads(text) if isinstance(text, (str, bytes)) else text))
 
-    def rvol_scan(self, day, symbols, floors, top, lookback, shortlist, live):
+    def rvol_scan(self, day, symbols, floors, top, lookback, shortlist, live, say=None):
         """scan.py rvol: the two-stage list of docs/PREREG_RVOL_ORB.md (mjonir/rvol.py) on Massive's data, with the
-        requests it made. mjonir.rvol.make_fetch is looked up at call time (the tests serve a synthetic store)."""
+        requests it made. mjonir.rvol.make_fetch is looked up at call time (the tests serve a synthetic store).
+        say(text) hears the stage-2 request count before stage 2 starts."""
         from . import rvol as R
         cal = self._run(K.Calendar.load)
         fetch = self._run(R.make_fetch, cal)
-        doc = self._run(R.scan, fetch, cal, day, symbols, floors, top, lookback, R.ADV_N, shortlist, live)
+        doc = self._run(R.scan, fetch, cal, day, symbols, floors, top, lookback, R.ADV_N, shortlist, live, say=say)
         doc["requests"] = fetch.requests()
         return doc
 

@@ -176,6 +176,45 @@ class Rules(unittest.TestCase):
             "no_first_bar": 1, "gap_guard": 1, "rvol_history_short": 0})
         self.assertEqual([r["symbol"] for r in doc["rows"]], ["OK"])
 
+    def test_rows_false_counts_the_same_and_computes_nothing_per_name(self):
+        st = Store(["AAA", "BBB"])
+        st.add("SHORT", 30.0, 2e6, [None] + [100.0] * (R.RVOL_N - 1), (30.0, 31.0, 29.9, 30.6, 9000.0))
+        passed = dict((s, {"price": 25.0, "adv_usd": 5e7, "adv_shares": 2e6}) for s in ("AAA", "BBB", "SHORT"))
+        firsts = dict((s, st.bars[s][DAY.isoformat()]) for s in passed)
+
+        def history(sym):
+            return [(st.bars[sym].get(d.isoformat()) or {}).get("v") for d in st.hist_days]
+        full, c_full = R.bar_stage(passed, firsts, history)
+        names, c_names = R.bar_stage(passed, firsts, history, rows=False)
+        self.assertEqual(c_full, c_names)
+        self.assertEqual(names, ["AAA", "BBB"])
+        self.assertEqual([r["symbol"] for r in full], names)
+
+    def test_names_with_no_snapshot_row_are_counted(self):
+        st = Store(["AAA", "BBB", "CCC"])
+        del st.snap["BBB"]
+        st.snap["CCC"] = 0.0
+        doc = R.scan(st, CAL, DAY, sorted(st.bars), FLOORS)
+        s1 = doc["stage1"]
+        self.assertEqual((s1["no_snapshot"], s1["zero_volume"], s1["with_volume"], s1["shortlist"]), (1, 1, 1, 1))
+
+    def test_a_replay_shortlist_reads_the_days_volume_for_stage_one_only(self):
+        st = Store(["AAA", "BBB", "CCC"])
+        st.daily[DAY] = dict((s, {"o": 1, "h": 1, "l": 1, "c": 1, "v": v}) for s, v in
+                             (("AAA", 9e6), ("BBB", 1e6), ("CCC", 5e6)))
+        said = []
+        doc = R.scan(st, CAL, DAY, sorted(st.bars), FLOORS, live=False, shortlist=2, say=said.append)
+        self.assertEqual(st.calls["snapshot"], 0)
+        self.assertIn(DAY, st.calls["grouped"])
+        self.assertIn("whole-session volume", doc["stage1"]["basis"])
+        self.assertEqual(st.calls["first_bars"][0][0], ["AAA", "CCC"])
+        self.assertEqual((doc["stage1"]["shortlist"], doc["params"]["shortlist"]), (2, 2))
+        self.assertIn("5-minute bars for 2 names", said[0])
+        doc = R.scan(Store(["AAA", "BBB", "CCC"]), CAL, DAY, ["AAA", "BBB", "CCC"], FLOORS, live=False,
+                     say=said.append)
+        self.assertEqual((doc["stage1"]["shortlist"], doc["params"]["shortlist"]), (3, None))
+        self.assertIn("5-minute bars for 3 names", said[1])
+
     def test_first_bar_from_5m_rows(self):
         s = synth.make_session(DAY, 3)
         rows = synth.as_tuples(s)
@@ -285,7 +324,14 @@ class Cli(unittest.TestCase):
         self.assertEqual(self.store.calls["snapshot"], 0)
         self.assertTrue(doc["stage1"]["basis"].startswith("replay"))
         self.assertIn("not recorded", err)
+        self.assertIn("Stage 2: 5-minute bars for 3 names", err)      # the request count, before stage 2
         self.assertFalse(os.path.exists(os.path.join(self.rec, "triggers.jsonl")))
+        self.store.daily[DAY] = dict((s, {"o": 1, "h": 1, "l": 1, "c": 1, "v": 1e6}) for s in self.store.bars)
+        code, out, err = run(["rvol", "--source", "massive", "--symbols", "UPP,DWN,AAA", "--date", "2026-10-19",
+                              "--now", "2026-10-20 12:00", "--shortlist", "2", "--no-record"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Stage 1 (replay, --shortlist 2)", out)
+        self.assertIn("Stage 2: 5-minute bars for 2 names", err)
 
     def test_a_late_live_scan_records_nothing(self):
         code, out, err = run(["rvol", "--source", "massive", "--symbols", "UPP,DWN", "--now", "2026-10-19 09:46",

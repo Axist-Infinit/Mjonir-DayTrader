@@ -11,11 +11,15 @@ file, cache file or API endpoint is touched, and the first that fails is named (
   status   the status line reads "Status: FROZEN (commit <7 to 40 hex>)"
   commit   `git cat-file -e <hash>` succeeds
   history  the hash is in `git log --format=%H -- docs/PREREG_RVOL_ORB.md`
+  freeze commit  the document at that commit reads "Status: FROZEN (commit pending)", at its parent "Status: DRAFT
+           (awaiting the owner's freeze)", and no earlier version of it reads FROZEN: the hash names F1, the one
+           step from the draft to the freeze, and a retune re-pointed at a later "pending" commit is refused
   body     `git show <hash>:docs/PREREG_RVOL_ORB.md` equals the working file once the status line and section 13
            are removed from both
   clean    `git status --porcelain docs/PREREG_RVOL_ORB.md` is empty
 The holdout (section 7) also needs --i-have-read-the-prereg, a development review whose JSON sidecar carries
-pass on every criterion of section 8.1, and no earlier holdout review (a second holdout run is a refusal).
+pass on every criterion the frozen text of section 8.1 counts, no earlier holdout review (a second holdout run is
+a refusal), and an --out of the form docs/reviews/rvol_holdout_*.md (so that refusal always sees the review).
 
 --counts-only (section 10) scores nothing: it prints and writes only counts (the monthly reference walks and
 their requests, the split rows, eligible names per session, exclusions by cause, first-bar coverage, the
@@ -56,7 +60,10 @@ PREREG = "docs/PREREG_RVOL_ORB.md"
 STATUS_RE = re.compile(r"^Status: FROZEN \(commit ([0-9a-f]{7,40})\)$")
 WINDOWS = {"dev": ("2021-01-04", "2023-12-29"), "holdout": ("2024-01-02", "2026-08-04")}
 DEFAULT_DAILY_DIR = "/home/axis/Infinit/data/polygon/flatfiles_cache"
-CHECKS = ("status", "commit", "history", "body", "clean")
+CHECKS = ("status", "commit", "history", "freeze commit", "body", "clean")
+STATUS_PENDING = "Status: FROZEN (commit pending)"
+STATUS_DRAFT = "Status: DRAFT (awaiting the owner's freeze)"
+HOLDOUT_OUT = re.compile(r"^rvol_holdout_[^/\\]+\.md$")
 
 #: Section 4.1, written once (tests compare this table with the document).
 PARAMS = {
@@ -136,6 +143,7 @@ def freeze_check(repo=REPO, rel=PREREG):
     full = [x for x in log.split() if x.startswith(h)]
     if code != 0 or not full:
         raise Refused("history", "%s is not a commit in `git log -- %s`" % (h, rel))
+    freeze_commit_check(repo, rel, full[0])
     code, then = _git(repo, "show", "%s:%s" % (full[0], rel))
     if code != 0 or comparable(then) != comparable(text):
         raise Refused("body", "%s differs from the document at %s outside the status line and section 13"
@@ -146,12 +154,50 @@ def freeze_check(repo=REPO, rel=PREREG):
     return full[0]
 
 
+def status_at(repo, rev, rel=PREREG):
+    """The document's status line at a revision, or None when the file is not there."""
+    code, text = _git(repo, "show", "%s:%s" % (rev, rel))
+    if code != 0:
+        return None
+    return next((ln for ln in text.split("\n") if ln.startswith("Status: ")), "")
+
+
+def freeze_commit_check(repo, rel, h):
+    """The sixth check: commit h is F1 (section 1, step 2): the document there reads pending, at its parent DRAFT,
+    and no earlier version of it reads FROZEN."""
+    now = status_at(repo, h, rel)
+    if now != STATUS_PENDING:
+        raise Refused("freeze commit", "the document at %s reads %r, not %r: the status line must name F1"
+                                       % (h[:12], now, STATUS_PENDING))
+    before = status_at(repo, h + "^", rel)
+    if before != STATUS_DRAFT:
+        raise Refused("freeze commit", "the document at the parent of %s reads %r, not %r: F1 is the one step "
+                                       "from the draft to the freeze" % (h[:12], before, STATUS_DRAFT))
+    code, older = _git(repo, "rev-list", h + "^", "--", rel)
+    for c in older.split():
+        st = status_at(repo, c, rel) or ""
+        if st.startswith("Status: FROZEN"):
+            raise Refused("freeze commit", "an earlier version of the document (%s) already reads %r: this "
+                                           "document was frozen before %s" % (c[:12], st, h[:12]))
+
+
 def reviews_dir(repo):
     return os.path.join(repo, "docs", "reviews")
 
 
+def holdout_out_check(repo, out):
+    """The holdout review goes to docs/reviews/rvol_holdout_*.md, where the second-run refusal looks."""
+    if out is None:
+        return
+    if os.path.dirname(os.path.abspath(out)) != os.path.abspath(reviews_dir(repo)) or \
+            not HOLDOUT_OUT.match(os.path.basename(out)):
+        raise Refused("holdout out", "--out %s: the holdout review is written to docs/reviews/rvol_holdout_<date>.md "
+                                     "only, so a second holdout run always finds it (section 7)" % out)
+
+
 def holdout_check(repo, flag):
-    """Section 7: the flag, no earlier holdout review, a development sidecar with pass on every criterion."""
+    """Section 7: the flag, no earlier holdout review, a development sidecar with pass on every criterion the frozen
+    text counts (read from the document, never from the sidecar)."""
     if not flag:
         raise Refused("holdout flag", "the holdout is read once, with --i-have-read-the-prereg (section 7)")
     d = reviews_dir(repo)
@@ -160,6 +206,8 @@ def holdout_check(repo, flag):
     if done:
         raise Refused("second holdout", "a holdout review exists (%s): a second holdout run under this document "
                                         "is a refusal (section 7)" % ", ".join(done))
+    with open(os.path.join(repo, PREREG), encoding="utf-8") as fh:
+        counted = criteria_counted(fh.read())
     ok = []
     for n in names:
         if n.startswith("rvol_dev_") and n.endswith(".json") and n[:-5] + ".md" in names:
@@ -167,17 +215,30 @@ def holdout_check(repo, flag):
                 with open(os.path.join(d, n), encoding="utf-8") as fh:
                     side = json.load(fh)
                 crit = side["criteria"]
-                if crit and all(crit[k]["state"] == "pass" for k in side["criteria_counted"]):
+                if all(crit[k]["state"] == "pass" for k in counted):
                     ok.append(n)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
     if not ok:
         raise Refused("development sidecar", "no development review in docs/reviews whose JSON sidecar carries "
-                                             "pass on every criterion of section 8.1")
+                                             "pass on every criterion of section 8.1 (%s, as the frozen text "
+                                             "counts them)" % ", ".join(counted))
     return ok[-1]
 
 
 # ---------------------------------------------------------------- the data (imported after the refusal)
+
+def code_stamp(repo, rvol_module):
+    """What a session file was scored with: the runner's own commit and a sha256 over PARAMS, this file's source
+    and mjonir/rvol.py's (the funnel). A session file with another stamp is scored again on a resume."""
+    import hashlib
+    h = hashlib.sha256(json.dumps(PARAMS, sort_keys=True).encode("utf-8"))
+    for path in (os.path.abspath(__file__), rvol_module.__file__):
+        with open(path, "rb") as fh:
+            h.update(fh.read())
+    _, commit = _git(repo, "log", "-1", "--format=%H", "--", "tools/rvol_study.py")
+    return {"runner_commit": commit.strip(), "code_sha256": h.hexdigest()}
+
 
 def _mj():
     if REPO not in sys.path:
@@ -253,6 +314,7 @@ class Study(object):
         self.early_rule = set()
         for y in range(self.lo.year - 1, self.hi.year + 1):
             self.early_rule |= set(self.K.rule_early_closes(y))
+        self.stamp = code_stamp(repo, self.R)
 
     # -- listings and the client
     @staticmethod
@@ -492,8 +554,9 @@ class Study(object):
             return "refused", early, basis
         return "ok", early, basis
 
-    def funnel(self, day, firsts):
-        """Sections 3.2 to 3.4 and 4.3 through mjonir.rvol: (eligible rows, counts by cause, population)."""
+    def funnel(self, day, firsts, rows=True):
+        """Sections 3.2 to 3.4 and 4.3 through mjonir.rvol: (eligible rows, counts by cause, population). rows=False
+        (counts-only) gets the eligible symbols only: no RVOL and no direction is computed for any name."""
         R = self.R
         pop = self.types(day)
         adv_days = self.before(self.daily_days, day, PARAMS["ADV_N"])
@@ -512,12 +575,13 @@ class Study(object):
         def history(sym):
             return [(h.get(sym) or (None, None, None))[2] for h in hist]
         fb = dict((t, {"o": o, "h": None, "l": None, "c": c, "v": v}) for t, (o, c, v) in firsts.items())
-        elig, c2 = R.bar_stage(passed, fb, history, PARAMS["RVOL_N"], PARAMS["GAP_GUARD"])
+        elig, c2 = R.bar_stage(passed, fb, history, PARAMS["RVOL_N"], PARAMS["GAP_GUARD"], rows=rows)
         counts = dict(c1)
         counts.update(c2)
         counts["eligible"] = len(elig)
-        for e in elig:
-            e["daily"] = passed[e["symbol"]]["rows"]
+        if rows:
+            for e in elig:
+                e["daily"] = passed[e["symbol"]]["rows"]
         return elig, counts, len(pop)
 
     # -- counts-only (section 10)
@@ -552,7 +616,7 @@ class Study(object):
             if status == "refused":
                 refused.append(day.isoformat())
                 continue
-            elig, counts, pop = self.funnel(day, firsts)
+            elig, counts, pop = self.funnel(day, firsts, rows=False)
             name_days += pop
             for c in self.R.CAUSES:
                 causes[c] += counts[c]
@@ -599,7 +663,8 @@ class Study(object):
         firsts, meta, df = self.build_store(day)
         status, early, basis = self.session_status(day, meta)
         lines = []
-        head = {"kind": "session", "date": day.isoformat(), "status": status, "early": early, "basis": basis}
+        head = {"kind": "session", "date": day.isoformat(), "status": status, "early": early, "basis": basis,
+                "stamp": self.stamp}
         if status != "ok":
             lines.append(head)
             return self._write_day(day, lines)
@@ -731,17 +796,21 @@ class Study(object):
         with open(tmp, "w", encoding="utf-8") as fh:
             for ln in lines:
                 fh.write(json.dumps(ln, sort_keys=True) + "\n")
-            fh.write(json.dumps({"kind": "end", "date": day.isoformat()}) + "\n")
+            fh.write(json.dumps({"kind": "end", "date": day.isoformat(), "stamp": self.stamp}, sort_keys=True) + "\n")
         os.replace(tmp, path)
         return lines
 
     def read_day(self, day):
+        """A session's lines from an earlier run, or None (score it again): no file, a cut file, or a head or end
+        row stamped with another runner commit or code hash."""
         path = self.day_path(day)
         if not os.path.exists(path):
             return None
         with open(path, encoding="utf-8") as fh:
             rows = [json.loads(x) for x in fh]
-        if not rows or rows[-1].get("kind") != "end":
+        if len(rows) < 2 or rows[-1].get("kind") != "end" or rows[0].get("kind") != "session":
+            return None
+        if rows[-1].get("stamp") != self.stamp or rows[0].get("stamp") != self.stamp:
             return None
         return rows[:-1]
 
@@ -789,11 +858,7 @@ def by_year(stats, trades):
                   "close_share": sum(1 for t in rows if t["outcome"] == "close") / float(n),
                   "target_share": sum(1 for t in rows if t["outcome"] == "target") / float(n),
                   "fragile": sum(1 for t in rows if t.get("fragile"))}
-    signs = dict((y, v["net"]["mean"] > 0) for y, v in out.items() if v["net"] and v["net"]["mean"] != 0)
-    note = None
-    if len(set(signs.values())) > 1:
-        note = "the sign of the net average flips between years: " + ", ".join(
-            "%s %+.3f (n %d)" % (y, out[y]["net"]["mean"], out[y]["n"]) for y in sorted(signs))
+    note = stats.sign_flip_note(dict((y, (v["n"], v["net"]["mean"] if v["net"] else None)) for y, v in out.items()))
     return out, note
 
 
@@ -847,19 +912,7 @@ def aggregate(stats, rows, counted=("1", "2", "3", "4")):
     sess_ci = _ci(stats, sess_vals)
     sess_state = stats.verdict_history({"triggered": len(sess_vals), "expectancy": sess_ci}, None, cost_mean)
     years, year_note = by_year(stats, fires)
-    at_floor = dict((y, v) for y, v in years.items() if v["n"] >= stats.N_FLOOR)
-    if not at_floor:
-        c3 = {"state": "unverified", "reason": "no_year_at_floor",
-              "text": "No calendar year holds %d fires: the by-year sign cannot be judged." % stats.N_FLOOR}
-    elif all(v["net"]["mean"] > 0 for v in at_floor.values()):
-        c3 = {"state": "pass", "reason": "above", "years": sorted(at_floor),
-              "text": "Every year with at least %d fires has a net mean above 0 (%s)."
-                      % (stats.N_FLOOR, ", ".join(sorted(at_floor)))}
-    else:
-        bad = sorted(y for y, v in at_floor.items() if not v["net"]["mean"] > 0)
-        c3 = {"state": "fail", "reason": "below", "years": bad,
-              "text": "A year with at least %d fires has a net mean at or under 0 (%s)." % (stats.N_FLOOR,
-                                                                                          ", ".join(bad))}
+    c3 = stats.verdict_years(dict((y, (v["n"], v["net"]["mean"])) for y, v in years.items()), stats.N_FLOOR)
     criteria = {"1": {"state": primary["state"], "reason": primary["reason"], "text": primary["text"]},
                 "2": {"state": control["state"], "reason": control["reason"], "text": control["text"]},
                 "3": c3,
@@ -1046,6 +1099,7 @@ def main(argv=None, repo=None, client=None, study_kw=None):
             freeze_hash = freeze_check(repo)
             if a.window == "holdout":
                 holdout_check(repo, a.read_it)
+                holdout_out_check(repo, a.out)
         except Refused as e:
             print("rvol_study: refused, check %s" % e, file=sys.stderr)
             return 1
@@ -1074,12 +1128,12 @@ def _run(a, argv, repo, st, freeze_hash):
     with open(os.path.join(repo, PREREG), encoding="utf-8") as fh:
         counted = criteria_counted(fh.read())
     agg = aggregate(stats, rows, counted)
-    _, runner = _git(repo, "log", "-1", "--format=%H", "--", "tools/rvol_study.py")
+    runner = st.stamp["runner_commit"]
     argv_text = ["tools/rvol_study.py"] + list(argv if argv is not None else sys.argv[1:])
-    side = dict(agg, window=a.window, freeze_hash=freeze_hash, runner_commit=runner.strip(), command=argv_text)
+    side = dict(agg, window=a.window, freeze_hash=freeze_hash, runner_commit=runner, command=argv_text)
     out = a.out or os.path.join(repo, "docs", "reviews", "rvol_%s_%s.md" % (
         a.window, st.K.today_et().isoformat()))
-    text = report_text(agg, a.window, freeze_hash, runner.strip(), argv_text)
+    text = report_text(agg, a.window, freeze_hash, runner, argv_text)
     bad = stats.banned_words(text)
     if bad:
         print("rvol_study: the report would carry banned words %s; not written" % bad, file=sys.stderr)
