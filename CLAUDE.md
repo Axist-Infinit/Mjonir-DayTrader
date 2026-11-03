@@ -17,7 +17,8 @@ gate. Plan and chunk status: README.md. Daily routine: docs/RUNBOOK.md. Reviews:
 ## Rules
 - No U+2014 em dash in any file outside `tests/fixtures/` (tests/test_repo.py enforces it).
 - Python 3.8 syntax inside `trader-*/` (no `zoneinfo`, no `list[`/`dict[`/`tuple[`, no `match`). `mjonir/` may use 3.12.
-- Stdlib only in `trader-*/` and `mjonir/`.
+- Stdlib only in `trader-*/` and `mjonir/`. `tools/` holds research runners (pandas allowed); `tools/rvol_study.py`
+  scores nothing until docs/PREREG_RVOL_ORB.md is FROZEN by the owner's word: before that only `--counts-only` runs.
 - Always run from the repo root: every script resolves `trader/` relative to the cwd. Never run from `~/Odyssey`.
 - Never print or log the API key; redact by name and by value. The key lives in `~/Infinit/.env`; never create
   `<repo>/.env` with a key (a local plugin install copies gitignored files into the plugin cache).

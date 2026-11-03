@@ -52,7 +52,7 @@ in `trader/` under the current directory.
 | 2 | Random-entry control: every replay compared with random entries on the same sessions | built on `feat/c2-measure` (not merged yet) |
 | 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | built on `feat/c3-record` (not merged) |
 | 3 | Risk in percent of a $100,000 trade notional: sizing, daily and weekly loss realized from the record, the loss-streak pause, the price, ADV, chase and averaging-down floors | built on `feat/c3-record` (not merged) |
-| 3 | A relative-volume opening-range hypothesis, preregistered before any code | planned |
+| 3 | A relative-volume opening-range hypothesis, preregistered before any code: docs/PREREG_RVOL_ORB.md, `scan.py rvol` (the live list), `tools/rvol_study.py` (the study's runner), on `feat/c3b-rvol` | prereg DRAFT committed; scanner and runner built; awaiting the owner's freeze |
 | 4 | Human E*TRADE ticket: `/trader-broker` prints the order for the owner to type by hand | planned |
 | 4 | The desk: `/trader-desk` runs the daily routine as one command | planned |
 

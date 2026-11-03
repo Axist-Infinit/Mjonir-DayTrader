@@ -12,7 +12,7 @@ description: >-
   "what is breaking out", "opening range breakouts", "scan for bull flags",
   "oversold stocks", "pre-market scan", "build my watchlist", "what should I
   look at today", or at the start of a trading day before /trader-news.
-argument-hint: "[universe | daily | orb] [--at HH:MM]"
+argument-hint: "[universe | daily | orb | rvol] [--at HH:MM]"
 ---
 
 # trader-scanner
@@ -33,6 +33,7 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols TSLA,NVDA,AMD  # or --watc
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                            # after 9:50 AM ET -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:15                 # cut the clock at 10:15 AM ET
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/scan.py" rvol --source massive              # the RVOL list (a hypothesis under test)
 ```
 
 Flags: `--min-price 5` and `--min-volume` (daily 1,000,000, orb 0),
@@ -47,8 +48,9 @@ reason is one plain line).
 | file | what |
 | --- | --- |
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
-| `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
-| `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30) |
+| `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol`. `rvol` adds its fires as `hits[]` with setup `rvol_orb5` beside the others |
+| `trader/rvol.json` | written by `rvol`: the list, its counts and its parameters (below) |
+| `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30); by `rvol`: `floors.min_price`, `floors.min_adv_usd`, `floors.min_avg_volume` |
 
 ## The universe
 
@@ -145,10 +147,12 @@ are in the calendar.
 1. Once a week or so: `scan.py universe`.
 2. Before the open: `scan.py daily`. Tell the user the counts (fetched,
    liquid, scanned, hits) and the top few by setup.
-3. After 9:50 AM ET (10:15 is the classic): `scan.py orb`. Tell the user how
+3. After the first five-minute bar, on the desk's RVOL step: `scan.py rvol --source massive`.
+   Tell the user the counts and the list, and that it is a hypothesis under test.
+4. After 9:50 AM ET (10:15 is the classic): `scan.py orb`. Tell the user how
    many usable charts broke their range and when, and that a later hit is
    closer to the price now.
-4. The user picks one chart. Hand it on: `/trader-news TICKER` (what is moving
+5. The user picks one chart. Hand it on: `/trader-news TICKER` (what is moving
    it), then `/trader-entry TICKER` (the entry bar by bar). Never pick for them.
 
 ## Example: the reel
@@ -199,6 +203,33 @@ the list from Massive's reference data over the floors in `trader/config.json`
 `python3 -m mjonir.bridge intraday ... --bundle` write the files. Without the flag
 nothing changes. The NYSE holiday lists extend themselves from `trader/calendar.json`, which
 `python3 -m mjonir.bridge calendar` writes from Massive's market-status calendar.
+
+## The RVOL list (rvol): a hypothesis under test, not a signal
+
+`scan.py rvol --source massive` (Massive only) builds the list that docs/PREREG_RVOL_ORB.md
+studies. The study has not been scored: the preregistration is a draft until the owner
+freezes it, and nothing in the list says a name will move. Narrate the keys of
+`trader/rvol.json` (or `--json`); never compute from them.
+
+- When: refused until the session's first five-minute bar has closed, with one plain line.
+  `--date YYYY-MM-DD` replays a past session; `live` says which it was.
+- Who can be on it (`funnel`, `floors_from`, `params.floors`): judged from the sessions
+  before the day only, against the three floors in `trader/config.json`. Each name left
+  out is counted under its first cause: `insufficient_history`, `split_guard`,
+  `below_price`, `below_adv_usd`, `below_adv_shares`, `no_first_bar`, `gap_guard`,
+  `rvol_history_short`, `fetch_failed`; `funnel.eligible` is what is left.
+- Stage 1 (`stage1`): live, one market snapshot sends `stage1.shortlist` names to stage 2;
+  a replay has no snapshot and `stage1.basis` says so.
+- The list (`rows[]`): the `params.top` names with the highest `rvol` (the first bar's
+  volume over its mean across the `params.lookback` sessions before), `rank` whatever the
+  bar did, ties by ticker; `direction` is up, down or doji; `fire` is true only for an up
+  bar; `fires` lists them in rank order. `volume_x` is the stage-1 ratio.
+- The fires join `trader/watchlist.json` as setup `rvol_orb5`. With `--record` (the
+  default) a live scan made soon after the bar records each fire in the forward record
+  with the prereg's plan (trader-exit's daily-ATR stop, no target, out at the flat-by);
+  a replay or a late scan records nothing, and says so on stderr.
+- Always say `live_vs_study` and `note` with the list: the live list can differ from the
+  study's on a few names a day, and it is a hypothesis under test.
 
 ## What it never does
 

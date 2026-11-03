@@ -3,7 +3,9 @@
 Status: chunk 1 built the data layer, chunk 2 the measurement (costs,
 intervals, the random-entry control; on `feat/c2-measure`) and chunk 3 the
 forward record and the risk in percent of the trade notional (on
-`feat/c3-record`; the relative-volume steps are not built). Steps marked
+`feat/c3-record`) and the relative-volume list (on `feat/c3b-rvol`; its
+preregistration, docs/PREREG_RVOL_ORB.md, is a DRAFT until the owner freezes
+it, and its study has not been scored). Steps marked
 "(chunk N)" are not built yet; their commands will not run until that chunk
 lands. Everything unmarked runs today.
 
@@ -62,13 +64,22 @@ The full hazard list is in CLAUDE.md.
 
 ## 09:35, relative volume
 
-- `scan.py rvol` writes the top-20 relative-volume list (chunk 3).
+- `python3 trader-scanner/scan.py rvol --source massive`, after the 9:30 bar
+  closes (refused before 9:35): the top 20 names by first-bar relative volume,
+  the list of docs/PREREG_RVOL_ORB.md. It writes `trader/rvol.json`, puts the
+  fires (the names whose 9:30 bar closed above its open) into
+  `trader/watchlist.json` as setup `rvol_orb5` beside the premarket hits, and
+  records each fire in the forward record with the prereg's plan (a tenth of
+  the 14-day daily ATR under the entry, no target, out at the flat-by). A scan
+  made after 9:45, or a `--date` replay, records nothing. The list is a
+  hypothesis under test, not a signal, and the live list can differ from the
+  study's on a few names a day.
 
 ## 09:45 to 10:15, the opening range
 
 - `python3 trader-scanner/scan.py orb --at 10:15 --source massive
-  --watchlist trader/watchlist.json` (the union with the RVOL list arrives in
-  chunk 3).
+  --watchlist trader/watchlist.json` (the watchlist holds the premarket hits
+  and the RVOL fires).
 - The owner picks ONE name.
 
 ## On the pick: arm
