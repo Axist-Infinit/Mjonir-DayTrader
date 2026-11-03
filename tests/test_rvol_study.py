@@ -510,7 +510,7 @@ class Pieces(Market):
         table = dict(re.findall(r"(?m)^\| `([A-Z_0-9, `]+)` \| ([^|]+) \|", text))
         P = study.PARAMS
         expect = {"P_MIN": "5.00 USD", "ADV_USD_MIN": "20,000,000 USD", "ADV_SH_MIN": "1,000,000 shares",
-                  "TOP_K": "20", "STOP_ATR_FRAC": "0.10", "CONTROL_K": "3 draws a fire", "SEED": "19",
+                  "TOP_K": "20", "STOP_ATR_FRAC": "0.10", "CONTROL_K": "3 draws a fill", "SEED": "19",
                   "DRAWS": "2,000", "N_FLOOR": "40", "TICK": "0.01 USD", "OR15_MIN": "15 minutes",
                   "POSTHOC_GATE_DATE": "2027-02-04"}
         for k, v in expect.items():
