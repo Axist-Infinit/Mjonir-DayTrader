@@ -123,17 +123,41 @@ def git(repo, *args):
     return p.stdout.decode().strip()
 
 
-def frozen_repo(root):
-    """A throwaway git repo holding the prereg through D0, F1 and F2 (section 1). Returns (repo, F1 hash)."""
-    repo = os.path.join(root, "repo")
+def init_repo(repo):
+    """An empty throwaway git repo with docs/reviews/ made and a test identity. Returns its path."""
     os.makedirs(os.path.join(repo, "docs", "reviews"))
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "tests@example.com")
     git(repo, "config", "user.name", "tests")
     git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
+def draft_text():
+    """The real prereg with its status line put back to the DRAFT line, whatever the real one reads now."""
     with open(os.path.join(ROOT, study.PREREG), encoding="utf-8") as fh:
         text = fh.read()
-    draft = re.sub(r"(?m)^Status: .*$", "Status: DRAFT (awaiting the owner's freeze)", text, count=1)
+    return re.sub(r"(?m)^Status: .*$", study.STATUS_DRAFT, text, count=1)
+
+
+def draft_repo(root):
+    """A throwaway git repo whose committed prereg reads DRAFT, with a copy of the runner in its tools/, so the
+    copy's REPO (from its own __file__) is this repo and not ROOT. Returns (repo, path of the copied runner)."""
+    repo = init_repo(os.path.join(root, "draft-repo"))
+    os.makedirs(os.path.join(repo, "tools"))
+    tool = os.path.join(repo, "tools", "rvol_study.py")
+    shutil.copyfile(TOOL, tool)
+    with open(os.path.join(repo, study.PREREG), "w", encoding="utf-8") as fh:
+        fh.write(draft_text())
+    git(repo, "add", study.PREREG, "tools/rvol_study.py")
+    git(repo, "commit", "-q", "-m", "D0")
+    return repo, tool
+
+
+def frozen_repo(root):
+    """A throwaway git repo holding the prereg through D0, F1 and F2 (section 1). Returns (repo, F1 hash)."""
+    repo = init_repo(os.path.join(root, "repo"))
+    draft = draft_text()
     path = os.path.join(repo, study.PREREG)
 
     def commit(body, msg):
@@ -200,6 +224,13 @@ class Market(unittest.TestCase):
 class Freeze(Market):
     def test_the_frozen_repo_passes_and_names_f1(self):
         self.assertEqual(study.freeze_check(self.repo), self.f1)
+
+    def test_the_real_document_is_frozen_at_f1(self):
+        # F1 5631923 froze it and F2 recorded the hash; after F2 only section 13 may change
+        with open(os.path.join(ROOT, study.PREREG), encoding="utf-8") as fh:
+            line = next(ln for ln in fh.read().split("\n") if ln.startswith("Status: "))
+        self.assertEqual(line, "Status: FROZEN (commit 56319239840bc3a54ae40649cb03314d880c1cb2)")
+        self.assertEqual(study.freeze_check(ROOT), "56319239840bc3a54ae40649cb03314d880c1cb2")
 
     def test_this_documents_own_status_gives_the_matching_outcome(self):
         # reads the document's own status line, so F1 and F2 do not turn the suite red
@@ -292,15 +323,18 @@ class Freeze(Market):
         self.assertEqual(study.freeze_check(repo), self.f1)
 
     def test_the_draft_refusal_opens_no_file_and_imports_no_pandas(self):
+        # its own DRAFT repo and a copy of the runner there: the real document is frozen since F1/F2
+        repo, tool = draft_repo(tempfile.mkdtemp(dir=self.root))
         locked = tempfile.mkdtemp(dir=self.root)
         data = tempfile.mkdtemp(dir=self.root)
         os.chmod(locked, 0)
         try:
-            env = dict(os.environ, MJONIR_FLATFILE_DIR=locked, MJONIR_DAILY_DIR=locked, MJONIR_DATA_DIR=data)
+            env = dict(os.environ, MJONIR_FLATFILE_DIR=locked, MJONIR_DAILY_DIR=locked, MJONIR_DATA_DIR=data,
+                       PYTHONPATH=ROOT)                  # mjonir from ROOT, should the copy ever get past the check
             code = ("import runpy, sys\nsys.argv = ['tools/rvol_study.py', '--window', 'dev']\ntry:\n"
                     "    runpy.run_path(%r, run_name='__main__')\nexcept SystemExit as e:\n    print('EXIT', e.code)\n"
-                    "print('PANDAS', 'pandas' in sys.modules)\n" % TOOL)
-            p = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                    "print('PANDAS', 'pandas' in sys.modules)\n" % tool)
+            p = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
         finally:
             os.chmod(locked, 0o700)
