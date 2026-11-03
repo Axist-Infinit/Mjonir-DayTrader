@@ -1,0 +1,18 @@
+Mjonir-DayTrader
+https://github.com/Axist-Infinit/Mjonir-DayTrader
+
+This repository is a fork of "The Day Trader skill" (the Trader skill v2),
+Copyright (c) Jake Schincariol, released under the MIT License:
+
+  https://github.com/Jakeschincariol/day-trader-skill
+  forked at commit 3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd (v2.0.0)
+
+Upstream's LICENSE file is kept unchanged at the root of this repository and
+applies to the upstream code and to this fork's changes alike.
+
+This fork adds a data layer on the Massive market-data API and changes how
+results are measured (transaction costs, confidence intervals, a random-entry
+control, and a forward record of every trigger, taken or not). Those changes
+are this fork's own and are not endorsed by the upstream author.
+
+Not financial advice. See the "Fine print" section of README.md.

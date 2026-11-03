@@ -1,4 +1,120 @@
-# The Day Trader skill
+# The Day Trader skill pack, Massive edition
+
+Jake Schincariol's 11 Claude skills for day trading, forked to read the Massive market-data API, to score every setup net of costs against a random-entry control, and to keep a forward record of every trigger before any money. Work in progress.
+
+This is Mjonir-DayTrader, a fork of
+[Jake Schincariol's Day Trader skill](https://github.com/Jakeschincariol/day-trader-skill)
+(MIT, forked at `3d0f4ef`; see NOTICE). Upstream's eleven skills are kept.
+This fork moves their data onto Massive, measures every result net of costs
+with an interval and a random-entry control, and adds a forward record with a
+money gate. Orders stay manual: the owner types every ticket at E*TRADE by
+hand, and nothing here talks to a broker.
+
+Nothing here promises a profit. Most people who day trade lose money. The
+forward record exists to find out, on paper and slowly, whether these setups
+beat costs and chance at all. Until its gate passes, this is a paper account.
+
+## Install (this fork)
+
+In Claude Code:
+
+```
+/plugin marketplace add Axist-Infinit/Mjonir-DayTrader
+/plugin install mjonir-daytrader@mjonir
+```
+
+On the owner's box, with the working tree as the marketplace (how this was
+verified: docs/reviews/chunk0.md):
+
+```bash
+claude plugin marketplace add /home/axis/Mjonir-DayTrader
+claude plugin install mjonir-daytrader@mjonir
+```
+
+A local folder install reads the skills live from the working tree: whatever
+is checked out in `/home/axis/Mjonir-DayTrader` is what loads, at the next
+session start or after `/reload-plugins`, and `claude plugin update` has
+nothing to do. For a one-off session without installing, `claude --plugin-dir
+/home/axis/Mjonir-DayTrader` is accepted. An install from GitHub is fetched
+from the remote instead and was not tested here.
+
+Installed as a plugin, the skills show up as `/mjonir-daytrader:trader-scanner`
+and so on. Run every command from the repo root: the scripts keep their state
+in `trader/` under the current directory.
+
+## What changed from upstream: the roadmap
+
+| chunk | change | status |
+| --- | --- | --- |
+| 0 | Bootstrap: NOTICE, CLAUDE.md, the plugin renamed `mjonir-daytrader` in marketplace `mjonir`, stub folders for the two new skills, a runbook stub | done |
+| 1 | Data layer on Massive: a stdlib `mjonir/` package (client, market calendar, bar cache, read-only local stores, Yahoo-shaped output), `--source massive` on each script, a bridge CLI, years of history instead of 60 days | planned |
+| 2 | Costs and intervals: slippage, spread and commission in every R; Wilson and bootstrap intervals; verdicts that say "cannot judge" below 40 fires | planned |
+| 2 | Random-entry control: every replay compared with random entries on the same sessions | planned |
+| 3 | Forward record and gate: `/trader-record` logs every trigger, taken or skipped, scores it after the close and prints the money gate | planned |
+| 3 | Risk in percent of a $100,000 notional; a relative-volume opening-range hypothesis, preregistered before any code | planned |
+| 4 | Human E*TRADE ticket: `/trader-broker` prints the order for the owner to type by hand | planned |
+| 4 | The desk: `/trader-desk` runs the daily routine as one command | planned |
+
+The two new skill folders, `/trader-record` and `/trader-desk`, are stubs
+today: each SKILL.md says what it will do and points to docs/RUNBOOK.md.
+
+## The daily routine (ET)
+
+A summary. The full timetable, with each step's build status, is
+docs/RUNBOOK.md. Every time is New York time.
+
+- **Sunday evening:** weekly prep (market calendar, universe rebuilt at the
+  $5 price and $20M ADV floors, store status); read the journal and the gate.
+- **08:00 to 08:30:** premarket. Daily scan to a watchlist of at most 30,
+  news on the watchlist, earnings facts only for names reporting this week.
+- **09:35:** the top-20 relative-volume list.
+- **09:45 to 10:15:** the opening-range scan on the watchlist plus the
+  relative-volume list. The owner picks ONE name.
+- **On the pick:** watch for the trigger. On it: the exit plan, the time
+  machine (net of costs, with its interval and the control), the size from
+  the $100,000 notional capped by a 1% max loss, the risk check, then a ticket
+  the owner types at E*TRADE by hand. Every trigger, taken or skipped, goes
+  into the record.
+- **During the trade:** alerts on the stop, the target and the flat-by time,
+  15:55 (12:55 on early-close days). No adds, no averaging down, no chasing.
+- **16:30:** score the record, print the report and the gate, commit `record/`.
+- **The money gate:** at least 40 resolved trades and at least 180 days, with
+  the net expectancy interval above zero and beating the random-entry
+  control. Until then the record is the paper account, and the $100,000 is a
+  unit of account, not an instruction to trade it. The gate is not a forecast.
+
+## A note on the numbers
+
+The TSLA example in the Upstream section below is upstream's arithmetic:
+gross, with no transaction costs, no confidence interval and no random-entry
+control. Chunk 2 recomputes it net of costs, and once it lands the numbers in
+that example will change (the history's average R, the verdict line, and
+whether the 1R plan clears reward to risk). Until then they stand as upstream
+published them.
+
+## Layout
+
+```
+.claude-plugin/   plugin mjonir-daytrader in marketplace mjonir, "skills": "./"
+trader-*/         upstream's eleven skills, plus trader-record and trader-desk (stubs)
+mjonir/           the stdlib data and measurement layer (chunk 1 onward)
+docs/             RUNBOOK.md, reviews/
+record/           the forward record: tracked, append-only (chunk 3)
+trader/           runtime state and caches: gitignored, created in the cwd
+tests/            upstream's suite plus the fork's tests
+NOTICE            attribution; LICENSE is upstream's MIT license, unchanged
+```
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+## Upstream: the Day Trader skill v2
+
+Everything from here to the end is upstream's README as published at
+`3d0f4ef`, with its headings moved down one level, "Files" moved ahead of
+"Fine print", and one paragraph for this fork at the top of "Fine print". Its
+install lines install upstream's original plugin, not this fork.
 
 11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
@@ -21,7 +137,7 @@ an order on its own. Paper trading is the default.
 > [github.com/Jakeschincariol/trader-skill](https://github.com/Jakeschincariol/trader-skill).
 > This repo is its day-trading sequel: the Trader skill v2.
 
-## Install
+### Install
 
 Paste this into Claude:
 
@@ -57,7 +173,7 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+### The eleven
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -73,7 +189,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
 
-## How to use it
+### How to use it
 
 Everything lands in a `trader/` folder in your project, and each skill reads
 what the last one wrote:
@@ -120,7 +236,7 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
-## The tools
+### The tools
 
 All standard-library Python. The data tools read public endpoints and are
 polite about it.
@@ -152,7 +268,32 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
+### Files
+
+```
+trader-scanner/     SKILL.md, scan.py
+trader-news/        SKILL.md, news.py
+trader-entry/       SKILL.md, entry.py
+trader-exit/        SKILL.md, exit.py
+trader-timemachine/ SKILL.md, timemachine.py
+trader-risk/        SKILL.md, check.py
+trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
+trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
+trader-alerts/      SKILL.md, alerts.py, alerts.example.json
+trader-analyst/     SKILL.md, facts.py, metrics.example.json
+trader-pelosi/      SKILL.md, ptr.py
+tests/              unittest suite + offline fixtures
+```
+
 ## Fine print
+
+**This fork.** Under `--source massive` (chunk 1) the scripts read the
+Massive API with the owner's own key from the environment; the key is never
+printed or written to a file. The owner places every order by hand at
+E*TRADE: upstream's broker connector setup (Alpaca, Interactive Brokers) is
+not used here, and chunk 4 rewrites `/trader-broker` to print a human ticket.
+The forward record's gate, not any replay, decides whether money is ever used.
+Upstream's fine print follows and still applies.
 
 **Not financial advice.** This is software that reads public data and does
 arithmetic. It does not know your situation and it cannot see the future.
@@ -196,21 +337,5 @@ public filings the minute they post.
 **Taxes.** Day-trading gains are short-term gains, and frequent trading makes
 wash sales likely. Nothing here is tax advice.
 
-## Files
-
-```
-trader-scanner/     SKILL.md, scan.py
-trader-news/        SKILL.md, news.py
-trader-entry/       SKILL.md, entry.py
-trader-exit/        SKILL.md, exit.py
-trader-timemachine/ SKILL.md, timemachine.py
-trader-risk/        SKILL.md, check.py
-trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
-trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
-trader-alerts/      SKILL.md, alerts.py, alerts.example.json
-trader-analyst/     SKILL.md, facts.py, metrics.example.json
-trader-pelosi/      SKILL.md, ptr.py
-tests/              unittest suite + offline fixtures
-```
-
 MIT. Made by [Jake Schincariol](https://opusjake.ai).
+Fork maintained by [Axist-Infinit](https://github.com/Axist-Infinit/Mjonir-DayTrader); see NOTICE.

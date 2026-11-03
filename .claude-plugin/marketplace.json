@@ -1,18 +1,18 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "day-trader-skill",
-  "description": "The Day Trader skill pack for Claude: the Trader skill v2",
+  "name": "mjonir",
+  "description": "Mjonir-DayTrader: the Day Trader skill pack, Massive edition (a fork of Jake Schincariol's Trader skill v2)",
   "owner": {
-    "name": "Jake Schincariol",
-    "url": "https://opusjake.ai"
+    "name": "Axist-Infinit",
+    "url": "https://github.com/Axist-Infinit"
   },
   "plugins": [
     {
-      "name": "day-trader-skill",
-      "description": "Eleven Claude skills for day trading: a chart scanner, a news monitor, an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager, an order executor (paper by default, never without your yes), price alerts, an earnings analyst and a Pelosi tracker.",
+      "name": "mjonir-daytrader",
+      "description": "Thirteen Claude skills for day trading: upstream's eleven (a chart scanner, a news monitor, an entry timer, an exit planner, a time machine, a risk manager, a budget manager, an order executor that never acts without your yes, price alerts, an earnings analyst and a Pelosi tracker) plus a forward record and a daily desk, being moved onto the Massive market-data API. Not financial advice.",
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/Jakeschincariol/day-trader-skill"
+      "homepage": "https://github.com/Axist-Infinit/Mjonir-DayTrader"
     }
   ]
 }

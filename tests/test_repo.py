@@ -5,15 +5,23 @@ import unittest
 
 from _load import ROOT
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
+# v2, the day-trading pack: the eleven folders the reel's repo card shows,
+# plus the Mjonir fork's two (the forward record and the daily desk)
 SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
-          "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
-# skills on the way to an order carry the safety block
+          "trader-pelosi", "trader-record", "trader-desk"]
+ABOUT = ("Jake Schincariol's 11 Claude skills for day trading, forked to read the Massive market-data API, "
+         "to score every setup net of costs against a random-entry control, and to keep a forward record "
+         "of every trigger before any money. Work in progress.")
+# skills on the way to an order carry the safety block (the desk prints the ticket, the record holds the gate)
 ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
-              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
+              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts", "trader-record",
+              "trader-desk"]
+# the fork's tracked root entries beside the skill folders
+FORK_ROOT = ["NOTICE", "CLAUDE.md", "docs", "mjonir", "record"]
+# local-only, never tracked: Claude Code's per-project folder, the cwd-relative runtime state,
+# a local key file and a test cache; tolerated when present, never required
+LOCAL_ONLY = (".claude", ".env", ".pytest_cache", "trader")
 V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
 
 
@@ -33,14 +41,14 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_thirteen_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
 
     def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git") and d not in LOCAL_ONLY)
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + FORK_ROOT + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -60,13 +68,13 @@ class Repo(unittest.TestCase):
     def test_plugin_manifest_points_at_the_root_skills(self):
         with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
             plugin = json.load(fh)
-        self.assertEqual(plugin["name"], "day-trader-skill")
+        self.assertEqual(plugin["name"], "mjonir-daytrader")
         self.assertEqual(plugin["skills"], "./")
         self.assertEqual(plugin["description"], ABOUT)
         with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
             market = json.load(fh)
-        self.assertEqual(market["name"], "day-trader-skill")
-        self.assertEqual(market["plugins"][0]["name"], "day-trader-skill")
+        self.assertEqual(market["name"], "mjonir")
+        self.assertEqual(market["plugins"][0]["name"], "mjonir-daytrader")
 
     def test_readme_carries_the_reel_copy(self):
         with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
@@ -76,6 +84,9 @@ class Repo(unittest.TestCase):
                      "https://github.com/Jakeschincariol/day-trader-skill install skill",
                      "/plugin marketplace add Jakeschincariol/day-trader-skill",
                      "/plugin install day-trader-skill@day-trader-skill",
+                     "/plugin marketplace add Axist-Infinit/Mjonir-DayTrader",
+                     "/plugin install mjonir-daytrader@mjonir",
+                     "## Upstream: the Day Trader skill v2",
                      "## Fine print"):
             self.assertIn(line, readme)
         for s in SKILLS:
