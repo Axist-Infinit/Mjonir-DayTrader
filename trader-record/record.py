@@ -78,6 +78,10 @@ OPEN_MIN = 9 * 60 + 30
 CLOSE_MIN = 16 * 60
 EARLY_MIN = 13 * 60
 STEP = 300
+#: Setups whose rule fixes its own plan, built by trader-exit with these flags instead of its defaults. rvol_orb5 is
+#: docs/PREREG_RVOL_ORB.md section 4.5: a tenth of the 14-day daily ATR under the entry, no target, out at the
+#: flat-by close (trader-exit floors the stop to the cent and refuses a risk under 0.05% of the price).
+SETUP_PLANS = {"rvol_orb5": {"stop": "datr:0.10", "target": "none", "exit": "close"}}
 
 
 class RecordFail(Exception):
@@ -178,24 +182,28 @@ def _r6(x):
 
 def rule_plan(doc, config=None, source="yahoo", now_utc=None, now_text=None):
     """(plan, basis) for a trigger with no plan file: trader-exit's own build_plan with its defaults (an orb:
-    or-mid stop, 2R target, the config's flat-by and min reward:risk, the cost card). (None, why) when
-    trader-exit refuses (a level setup has no default stop; a plan under the net minimum reward:risk)."""
+    or-mid stop, 2R target, the config's flat-by and min reward:risk, the cost card), or with the setup's own
+    flags when SETUP_PLANS names it. (None, why) when trader-exit refuses (a level setup has no default stop; a
+    plan under the net minimum reward:risk; a datr stop under the 0.05% floor)."""
     ex = _script("trader-exit", "exit")
     ex.SOURCE = "massive" if source == "massive" else "yahoo"
     orr = doc.get("opening_range") or {}
+    spec = SETUP_PLANS.get(doc.get("setup")) or {}
     ns = argparse.Namespace(
         from_path=None, symbol=doc.get("symbol"), entry=doc.get("price"), or_high=orr.get("high"),
         or_low=orr.get("low"), or_minutes=orr.get("minutes") or 15, setup=doc.get("setup"), date=doc.get("date"),
         time=doc.get("time"), entry_bar=doc.get("bar_index"), interval=doc.get("interval") or "5m", side="buy",
-        stop=None, target=None, exit=None, shares=None, no_costs=False, flat_by=None,
-        config=config or "trader/config.json", offline=None, now=now_text, write=None, json=False)
+        stop=spec.get("stop"), target=spec.get("target"), exit=spec.get("exit"), shares=None, no_costs=False,
+        flat_by=None, config=config or "trader/config.json", offline=None, now=now_text, write=None, json=False)
+    what = "the setup's own plan" if spec else "the default plan"
     try:
         plan, _ = ex.build_plan(ns, now_utc or parse_now(now_text))
     except ex.PlanError as e:
-        return None, "trader-exit refused the default plan: %s" % e
+        return None, "trader-exit refused %s: %s" % (what, e)
     except Exception as e:   # a data layer that could not answer: the trigger is still recorded
-        return None, "the default plan could not be built: %s" % e
-    return plan, "trader-exit defaults for the setup (%s stop, %s target)" % (
+        return None, "%s could not be built: %s" % (what, e)
+    return plan, "trader-exit %s for the setup (%s stop, %s target)" % (
+        "flags (%s)" % " ".join("--%s %s" % kv for kv in sorted(spec.items())) if spec else "defaults",
         plan.get("stop_rule"), ("%gR" % plan["target_r"]) if plan.get("target_r") is not None else "no")
 
 

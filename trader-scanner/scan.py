@@ -7,6 +7,8 @@
     python3 scan.py orb                               # after 9:50 AM ET: opening-range breakouts so far
     python3 scan.py orb --at 10:15 --or-minutes 15    # cut the clock at 10:15 AM ET
     python3 scan.py orb --offline wall5m.json.gz --now "2026-10-19 10:15" --min-price 0
+    python3 scan.py rvol --source massive             # after 9:35 AM ET: the RVOL list (docs/PREREG_RVOL_ORB.md)
+    python3 scan.py rvol --source massive --date 2026-10-19 --no-record   # replay a past session
 
 universe  Downloads Nasdaq Trader's symbol directories (nasdaqlisted.txt and
           otherlisted.txt) and keeps US-listed common stocks, ordinary shares
@@ -49,6 +51,27 @@ orb       Opening-range breakouts, 5-minute bars. The range is the first
           so when it stops short. A chart is usable only when every 5-minute
           bar from 9:30 to the cutoff is there (a missing bar is a halt or no
           trades). Floors: --min-price 5 (last close), --min-volume 0.
+
+rvol      The RVOL list of docs/PREREG_RVOL_ORB.md, a hypothesis under test, not a
+          signal. Massive only (--source massive). Eligibility from the
+          sessions BEFORE the day only: the prior close, the mean dollar volume
+          and the mean share volume over 20 sessions against floors.min_price,
+          floors.min_adv_usd and floors.min_avg_volume in the config; a split
+          inside that window, or a first bar opening far from the prior close,
+          leaves a name out (counted). Stage 1: one full-market snapshot ranks
+          day volume over the mean volume to a shortlist (--shortlist 200);
+          stage 2: the exact first-bar RVOL, the 9:30 bar's volume over its mean
+          across the --lookback (14) sessions before, from 5-minute bars. The
+          list is the --top (20) by RVOL whatever the bar did, ties by ticker;
+          its fires are the names whose 9:30 bar closed above its open (a doji
+          is not up). Refused before 9:35 AM ET. --date D replays a past day
+          (no snapshot then: every name past the floors goes to stage 2).
+          Writes trader/rvol.json and puts the fires into trader/watchlist.json
+          (setup rvol_orb5, beside the other hits); with --record (the default)
+          a live scan made by 9:45 AM records each fire in the forward record
+          with the prereg's plan (trader-exit: datr:0.10 stop, no target, out at
+          the flat-by). The live list can differ from the study's on a few names
+          a day (PREREG section 11).
 
 Bars: null closes are dropped, a bar off the 5-minute grid (the live tick,
 like 10:49:45) is dropped, and a bar counts only once it is complete
@@ -1062,6 +1085,256 @@ def _p(x):
     return "{:,.2f}".format(x)
 
 
+# ---------------------------------------------------------------- rvol (docs/PREREG_RVOL_ORB.md)
+
+RVOL_FROM = datetime.time(9, 35)     # the 9:30 bar is complete
+RVOL_RECORD_BY = datetime.time(9, 45)  # a live list goes into the forward record only from a scan made by then
+RVOL_SETUP = "rvol_orb5"
+RVOL_NOTE = ("The RVOL list is a hypothesis under test (docs/PREREG_RVOL_ORB.md), not a signal: nothing in it "
+             "says a name will move. Education and tooling, not financial advice.")
+RVOL_VS_STUDY = ("The live list ranks a snapshot first and exact first bars second, on Massive's adjusted bars; it "
+                 "may differ from the study's list on a few names a day (docs/PREREG_RVOL_ORB.md section 11).")
+_RECORD = []
+
+
+def rvol_day(local, date_text):
+    """(day, live) for rvol, or ScanError: a live scan is today's session after 9:35 AM ET; --date replays a
+    past session (or today's, once its 9:30 bar is complete)."""
+    if date_text:
+        try:
+            day = datetime.date.fromisoformat(str(date_text).strip())
+        except ValueError:
+            raise ScanError("--date wants YYYY-MM-DD, not %r" % date_text)
+        live = False
+    else:
+        day, live = local.date(), True
+    ok, why = trading_day(day)
+    if not ok:
+        raise ScanError("No session on %s (%s): rvol needs a session's 9:30 bar." % (day_label(day), why))
+    if day > local.date():
+        raise ScanError("--date %s is after today (%s ET)." % (day.isoformat(), local.date().isoformat()))
+    if day == local.date() and local.time() < RVOL_FROM:
+        raise ScanError("It is %s ET: the 9:30 bar closes at 9:35 AM, and the RVOL list ranks that bar. Run rvol again "
+                        "after 9:35 AM." % clock_label(local))
+    return day, live
+
+
+def rvol_floors(cfg, R):
+    """({min_price, min_adv_usd, min_avg_volume}, {key: where it came from}): the config's floors block (the
+    universe block for the first two when floors has none), else mjonir.rvol's defaults (the prereg's)."""
+    fl = cfg.get("floors") if isinstance(cfg.get("floors"), dict) else {}
+    uni = cfg.get("universe") if isinstance(cfg.get("universe"), dict) else {}
+    out, src = {}, {}
+    for key, uni_key, default in (("min_price", "min_price", R.P_MIN), ("min_adv_usd", "min_adv_usd", R.ADV_USD_MIN),
+                                  ("min_avg_volume", None, R.ADV_SH_MIN)):
+        if fl.get(key) is not None:
+            v, where = fl[key], "floors.%s" % key
+        elif uni_key and uni.get(uni_key) is not None:
+            v, where = uni[uni_key], "universe.%s" % uni_key
+        else:
+            v, where = default, "the default (no floors.%s in the config)" % key
+        try:
+            out[key] = float(v)
+        except (TypeError, ValueError):
+            raise ScanError("%s in the config must be a number, got %r" % (where, v))
+        src[key] = where
+    return out, src
+
+
+def rvol_symbols(a):
+    """The type list: --symbols, else --universe (default trader/universe.txt: `scan.py universe --source massive`
+    keeps common stocks and ADRs under the ticker rule)."""
+    if a.symbols:
+        syms = [s for s in re.split(r"[,\s]+", a.symbols.upper()) if s]
+    else:
+        path = a.universe or DEFAULT_UNIVERSE
+        if not os.path.exists(path):
+            raise ScanError("no %s yet: run `scan.py universe --source massive` first, or pass --symbols" % path)
+        syms = symbols_from_file(path)
+    out = sorted(set(syms))
+    if not out:
+        raise ScanError("no symbols to rank")
+    return out
+
+
+def rvol_entry_doc(r, day, now):
+    """The trigger the forward record takes for one fire: trader-entry's contract shape (trader/entry.json), an
+    entry at the close of the 9:30 bar (bar 0) with that bar as a 5-minute opening range (so n_or = 1)."""
+    fb = r["first_bar"]
+    return {"created_by": "trader-scanner", "symbol": r["symbol"], "setup": RVOL_SETUP, "side": "buy",
+            "date": day.isoformat(), "status": "triggered", "time": "09:35", "bar_start": "09:30", "bar_index": 0,
+            "price": fb["c"], "level": None, "interval": "%dm" % BAR_MIN,
+            "opening_range": {"high": fb["h"], "low": fb["l"], "minutes": BAR_MIN}, "source": SOURCE,
+            "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reason": "rank %d of the RVOL list; its 9:30 bar closed above its open" % r["rank"]}
+
+
+def _record_module():
+    if not _RECORD:
+        import importlib.util
+        root = os.environ.get("MJONIR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("trader_scanner_record",
+                                                      os.path.join(root, "trader-record", "record.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RECORD.append(mod)
+    return _RECORD[0]
+
+
+def rvol_record(a, doc, day, now, local, live):
+    """--record: each fire into the forward record, once (trader-record), with the prereg's plan built by
+    trader-exit. A replay, or a live scan made after 9:45 AM, records nothing (the record takes no hindsight).
+    Returns the lines it says (stderr)."""
+    rows = [r for r in doc["rows"] if r["fire"]]
+    if not a.record:
+        return []
+    if not live:
+        return ["record: not recorded: --date replays a past session, and a replay is not the forward record."]
+    if local.time() > RVOL_RECORD_BY:
+        return ["record: not recorded: the scan ran at %s ET, after %s; the record takes a 9:35 entry only from a "
+                "scan made by then." % (clock_label(local), clock_label(RVOL_RECORD_BY))]
+    out = []
+    for r in rows:
+        try:
+            got = _record_module().record_trigger(
+                rvol_entry_doc(r, day, now), None, None, a.config, SOURCE, now, a.now, bars_label=SOURCE,
+                extra={"rvol": r["rvol"], "volume_x": r.get("volume_x")}, record_dir=a.record_dir)
+            out.append("record: %s" % got["message"])
+        except Exception as e:   # noqa: the record is a side effect of the scan, never its failure
+            out.append("record: NOT RECORDED %s: %s" % (r["symbol"], e))
+    return out
+
+
+def merge_watchlist(path, doc, now):
+    """The fires into the watchlist as rvol_orb5 hits, beside the hits already there (the daily scan's): an earlier
+    rvol tag or hit is dropped first, so the file holds today's list only."""
+    old = None
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                old = json.load(fh)
+        except (OSError, ValueError):
+            old = None
+    if not (isinstance(old, dict) and isinstance(old.get("hits"), list)):
+        old = None
+    hits = []
+    for h in (old or {}).get("hits") or []:
+        if not isinstance(h, dict):
+            continue
+        tags = [t for t in (h.get("setups") or []) if t != RVOL_SETUP]
+        if h.get("setup") == RVOL_SETUP and not tags:
+            continue
+        h = dict(h, setups=tags)
+        h.pop("rvol", None)
+        if h.get("setup") == RVOL_SETUP:
+            h.pop("setup")
+        hits.append(h)
+    by = dict((h.get("symbol"), h) for h in hits)
+    added = 0
+    for r in doc["rows"]:
+        if not r["fire"]:
+            continue
+        tag = {"rank": r["rank"], "rvol": round(r["rvol"], 4), "date": doc["date"]}
+        h = by.get(r["symbol"])
+        if h is None:
+            hits.append({"symbol": r["symbol"], "setups": [RVOL_SETUP], "setup": RVOL_SETUP,
+                         "price": round(r["first_bar"]["c"], 2), "rvol": tag})
+        else:
+            h["setups"] = h["setups"] + [RVOL_SETUP]
+            h["rvol"] = tag
+        added += 1
+    out = dict(old) if old else {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 "mode": "rvol", "source": SOURCE, "note": NOTE}
+    out["hits"] = hits
+    out["rvol"] = {"date": doc["date"], "fires": doc["fires"], "list": doc.get("_path"), "setup": RVOL_SETUP}
+    write_json(path, out)
+    return added
+
+
+def _rule_floor(floors, src):
+    keys = ("min_price", "min_adv_usd", "min_avg_volume")
+    if all(src[k].startswith("floors.") for k in keys):
+        where = "the config's floors block"
+    else:
+        where = "; ".join("%s from %s" % (k, "the default" if src[k].startswith("the default") else src[k])
+                          for k in keys)
+    return ("price $%s+, ADV $%s+ and %s+ shares a day (%s)"
+            % (_n(floors["min_price"]), "{:,.0f}".format(floors["min_adv_usd"]),
+               "{:,.0f}".format(floors["min_avg_volume"]), where))
+
+
+def cmd_rvol(a):
+    t0 = time.time()
+    if SOURCE != "massive":
+        raise ScanError("rvol reads Massive (a full-market snapshot and 5-minute bars): run it with --source massive "
+                        "or export TRADER_SOURCE=massive")
+    if a.top < 1 or a.lookback < 1 or a.shortlist < 1:
+        raise ScanError("--top, --lookback and --shortlist want whole numbers above 0")
+    now = parse_now(a.now)
+    local = to_eastern(now)
+    day, live = rvol_day(local, a.date)
+    ad = _mjonir()
+    from mjonir import rvol as R   # _mjonir() put the package on the path
+    floors, src = rvol_floors(read_config(a.config), R)
+    symbols = rvol_symbols(a)
+    progress(a, "RVOL list for %s: %s names in the type list; stage 1 %s..."
+             % (day.isoformat(), "{:,}".format(len(symbols)), "one snapshot" if live else "skipped (a past day)"))
+    doc = ad.rvol_scan(day, symbols, floors, a.top, a.lookback, a.shortlist, live)
+    doc.update({"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "rvol",
+                "setup": RVOL_SETUP, "source": SOURCE, "universe": len(symbols), "floors_from": src,
+                "as_of": "%s %s ET" % (day.isoformat(), local.strftime("%H:%M") if day == local.date() else "close"),
+                "note": RVOL_NOTE, "live_vs_study": RVOL_VS_STUDY})
+    if not a.no_write:
+        doc["_path"] = a.write
+        write_json(a.write, dict((k, v) for k, v in doc.items() if k != "_path"))
+        merge_watchlist(a.watchlist_out, doc, now)
+    doc.pop("_path", None)
+    lines = rvol_record(a, doc, day, now, local, live)
+    for ln in lines:
+        print(ln, file=sys.stderr)
+    if a.json:
+        print(json.dumps(dict(doc, seconds=round(time.time() - t0, 1)), indent=2))
+        return 0 if doc["rows"] else 1
+    s1, f = doc["stage1"], doc["funnel"]
+    print("RVOL list, %s %s ET, session %s (%s): the top %d by first-bar relative volume, Massive."
+          % (day_label(local.date()), clock_label(local), day.isoformat(), "live" if live else "replay", a.top))
+    print("Floors from the %d sessions before the day: %s. %s of %s names passed (%s)."
+          % (doc["params"]["adv_sessions"], _rule_floor(floors, src), "{:,}".format(s1["passed_floors"]),
+             "{:,}".format(s1["candidates"]),
+             ", ".join("%s %s" % (k.replace("_", " "), "{:,}".format(f[k])) for k in R.FLOOR_CAUSES)))
+    if live:
+        print("Stage 1: one snapshot (%s rows, %s of another day); %s names with day volume; the %s highest day volume "
+              "over mean volume go to stage 2." % ("{:,}".format(s1["snapshot_rows"]), "{:,}".format(s1["snapshot_other_day"]),
+                                                   "{:,}".format(s1["with_volume"]), "{:,}".format(s1["shortlist"])))
+    else:
+        print("Stage 1: skipped (a past day has no snapshot); every name past the floors goes to stage 2 (%s)."
+              % "{:,}".format(s1["shortlist"]))
+    print("Stage 2: 5-minute bars; %s eligible (%s)." % (
+        "{:,}".format(f["eligible"]), ", ".join("%s %s" % (k.replace("_", " "), "{:,}".format(f[k]))
+                                               for k in R.BAR_CAUSES + ("fetch_failed",))))
+    if doc["rows"]:
+        print("  rank  symbol   RVOL      9:30 bar   close")
+        for r in doc["rows"][:a.show]:
+            print("  %4d  %-6s %8.2f  %-9s %8s" % (r["rank"], r["symbol"], r["rvol"], r["direction"],
+                                                   _p(r["first_bar"]["c"])))
+        print("%d of the %d closed their 9:30 bar above its open (the fires, setup %s)%s"
+              % (len(doc["fires"]), len(doc["rows"]), RVOL_SETUP,
+                 (": " + ", ".join(doc["fires"]) + ".") if doc["fires"] else "."))
+    else:
+        print("No eligible name: the list is empty.")
+    if doc["fetch_failed"]:
+        print("UNVERIFIED: %d name(s) could not be fetched in stage 2: %s."
+              % (len(doc["fetch_failed"]), ", ".join(sorted(doc["fetch_failed"]))))
+    print("%s requests to Massive." % "{:,}".format(doc.get("requests") or 0))
+    if not a.no_write:
+        print("Wrote %s and put %d fire%s into %s (setup %s)." % (a.write, len(doc["fires"]),
+                                                               "" if len(doc["fires"]) == 1 else "s",
+                                                               a.watchlist_out, RVOL_SETUP))
+    print(RVOL_VS_STUDY)
+    print(RVOL_NOTE)
+    return 0 if doc["rows"] else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Chart Scanner (trader-scanner): daily setups and opening-range breakouts.")
     sub = ap.add_subparsers(dest="cmd")
@@ -1102,6 +1375,28 @@ def main(argv=None):
     p.add_argument("--at", help="cut the clock at this New York time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 15:30)")
     p.add_argument("--config", default="trader/config.json")
+
+    p = sub.add_parser("rvol", help="after 9:35 AM: the RVOL list of docs/PREREG_RVOL_ORB.md (Massive only)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--symbols", help="comma-separated tickers instead of the universe (the type list)")
+    g.add_argument("--universe", help="symbol list, one SYMBOL|Name a line (default %s)" % DEFAULT_UNIVERSE)
+    p.add_argument("--date", help="replay a past session, YYYY-MM-DD (default: today, live)")
+    p.add_argument("--top", type=int, default=20, help="the list's length (20)")
+    p.add_argument("--lookback", type=int, default=14, help="sessions in the RVOL denominator (14)")
+    p.add_argument("--shortlist", type=int, default=200, help="names stage 1 sends to stage 2, live (200)")
+    p.add_argument("--source", choices=["yahoo", "massive"], help="massive (required); or export TRADER_SOURCE=massive")
+    p.add_argument("--now", help='pretend it is this time ("2026-10-19 09:40" New York, or ...Z)')
+    p.add_argument("--write", default="trader/rvol.json", help="the list (default trader/rvol.json)")
+    p.add_argument("--watchlist-out", default="trader/watchlist.json", help="where the fires go (beside its hits)")
+    p.add_argument("--no-write", action="store_true")
+    p.add_argument("--record", dest="record", action="store_true", default=True,
+                   help="record each fire in the forward record (the default; live, by 9:45 AM)")
+    p.add_argument("--no-record", dest="record", action="store_false", help="do not record the fires")
+    p.add_argument("--record-dir", help="default ${TRADER_RECORD_DIR:-record}")
+    p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--show", type=int, default=20, help="rows to print (all are written)")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     global SOURCE
     SOURCE = "massive" if (getattr(a, "source", None) or os.environ.get("TRADER_SOURCE")) == "massive" else "yahoo"
@@ -1109,7 +1404,7 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd](a)
+        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "rvol": cmd_rvol}[a.cmd](a)
     except ScanError as e:
         print("scan.py: %s" % e, file=sys.stderr)
         return 1

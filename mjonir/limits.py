@@ -8,7 +8,8 @@ figure. Percent limits are percents of that notional, not of an account.
     "sizing":     {"trade_notional_usd": 100000, "max_loss_pct_of_notional": 1.0}
     "limits_pct": {"daily_loss": 1.0, "weekly_loss": 2.0, "max_consecutive_losses": 3,
                    "pause_sessions_after_streak": 1, "max_trades_per_day": 3}
-    "floors":     {"min_price": 5, "min_adv_usd": 20000000, "max_chase_pct": 0.5, "no_averaging_down": true}
+    "floors":     {"min_price": 5, "min_adv_usd": 20000000, "min_avg_volume": 1000000, "max_chase_pct": 0.5,
+                   "no_averaging_down": true}
 
 derive_limits(cfg) -> the dollar knobs:
 
@@ -32,7 +33,7 @@ SIZING_KEYS = ("trade_notional_usd", "max_loss_pct_of_notional")
 LEGACY_KEYS = ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_order_usd", "max_trades_per_day", "budget")
 LIMITS_PCT_DEFAULTS = {"daily_loss": 1.0, "weekly_loss": 2.0, "max_consecutive_losses": 3,
                        "pause_sessions_after_streak": 1, "max_trades_per_day": 3}
-FLOOR_KEYS = ("min_price", "min_adv_usd", "max_chase_pct", "no_averaging_down")
+FLOOR_KEYS = ("min_price", "min_adv_usd", "min_avg_volume", "max_chase_pct", "no_averaging_down")
 
 
 class LimitsError(ValueError):
@@ -64,14 +65,15 @@ def is_notional(cfg):
 
 
 def floors(cfg):
-    """The floors block, checked: {min_price, min_adv_usd, max_chase_pct, no_averaging_down}; absent keys None."""
+    """The floors block, checked: {min_price, min_adv_usd, min_avg_volume, max_chase_pct, no_averaging_down}; absent
+    keys None. min_avg_volume (mean shares a day over 20 sessions) is read by scan.py rvol, not by trader-risk."""
     f = (cfg or {}).get("floors")
     if f is None:
         return {k: None for k in FLOOR_KEYS}
     if not isinstance(f, dict):
         raise LimitsError("floors must be an object, got %r" % (f,))
     out = {}
-    for k in ("min_price", "min_adv_usd", "max_chase_pct"):
+    for k in ("min_price", "min_adv_usd", "min_avg_volume", "max_chase_pct"):
         out[k] = None if f.get(k) is None else _num(f, k, "floors")
     nad = f.get("no_averaging_down")
     if nad not in (None, True, False):

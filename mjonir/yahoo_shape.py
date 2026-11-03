@@ -806,6 +806,16 @@ class Adapter(object):
         """news.py: Massive news rows (JSON text or a list) as trader-news items."""
         return self._run(lambda: news_items(ticker, json.loads(text) if isinstance(text, (str, bytes)) else text))
 
+    def rvol_scan(self, day, symbols, floors, top, lookback, shortlist, live):
+        """scan.py rvol: the two-stage list of docs/PREREG_RVOL_ORB.md (mjonir/rvol.py) on Massive's data, with the
+        requests it made. mjonir.rvol.make_fetch is looked up at call time (the tests serve a synthetic store)."""
+        from . import rvol as R
+        cal = self._run(K.Calendar.load)
+        fetch = self._run(R.make_fetch, cal)
+        doc = self._run(R.scan, fetch, cal, day, symbols, floors, top, lookback, R.ADV_N, shortlist, live)
+        doc["requests"] = fetch.requests()
+        return doc
+
     def universe_rows(self, a=None):
         """scan.py universe: (kept [(SYM, name)], counts, as_of) from the Massive universe rule."""
         from . import universe as U
